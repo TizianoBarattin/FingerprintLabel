@@ -1,0 +1,104 @@
+/* Classi riutilizzabili del Label Editor (spostate dallo <style scoped> del componente) */
+
+html, body { margin: 0; height: 100%; background: #fff; }
+
+.section-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: #666;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.source-editor {
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+  resize: none;
+  font-family: 'Cascadia Code', 'Fira Mono', Consolas, monospace;
+  font-size: 11.5px;
+  line-height: 1.55;
+  padding: 8px;
+  border: 1px solid #d1d5db;
+  border-radius: 4px;
+  background: #fafafa;
+  color: #1f2937;
+  outline: none;
+  overflow-y: auto;
+}
+.source-editor:focus {
+  border-color: #6b7280;
+  background: #fff;
+}
+
+.missing-fonts-box {
+  background: #fef2f2;
+  border: 1px solid #fca5a5;
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-size: 11px;
+}
+.missing-font-row {
+  font-family: monospace;
+  font-size: 11px;
+  color: #b91c1c;
+  padding: 1px 0;
+}
+
+.var-fixed-label {
+  font-size: 13px;
+  color: #374151;
+  font-weight: 500;
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bc-type-badge {
+  font-size: 9px;
+  font-weight: 700;
+  color: #7c3aed;
+  background: #ede9fe;
+  border-radius: 3px;
+  padding: 1px 5px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.var-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  padding: 2px 7px;
+  background: #dbeafe;
+  color: #1e40af;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+.dim-input {
+  width: 44px; border: none; border-bottom: 1px solid #d1d5db;
+  background: transparent; font-size: 12px; text-align: center;
+  outline: none; color: #374151; padding: 1px 2px;
+}
+.dim-input:focus { border-bottom-color: #6366f1; }
+.dim-select {
+  border: none; border-bottom: 1px solid #d1d5db;
+  background: transparent; font-size: 12px; color: #374151;
+  outline: none; cursor: pointer; padding: 1px 2px;
+}
+.dim-select:focus { border-bottom-color: #6366f1; }
+
+.fit-btn {
+  height: 20px; padding: 0 5px; font-size: 11px;
+  border: 1px solid #d1d5db; border-radius: 3px;
+  background: #fff; cursor: pointer;
+  display: inline-flex; align-items: center; color: #555;
+}
+.fit-btn:hover:not([disabled]) { background: #f0f0f0; }
+.fit-btn[disabled] { opacity: 0.4; cursor: default; }
