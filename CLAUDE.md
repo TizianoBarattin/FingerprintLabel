@@ -7,7 +7,7 @@ mantieni lo stesso stack e lo stesso stile di codice per rendere facile il ripor
 ## Stack e comandi
 - Vue 3 Composition API (`<script setup>`), Vite 6, PrimeFlex, PrimeIcons, DevExtreme 24.2.5 (`DxButton`, `DxTextBox`).
 - bwip-js caricato a runtime da CDN (`https://cdn.jsdelivr.net/npm/bwip-js@4/dist/bwip-js-min.js`) in `onMounted`, cache in `bwipjsLib`.
-- Licenza DevExtreme in `.env.local` (`VITE_DEVEXTREME_LICENSE_KEY`, vedi `.env.local.example`); senza, compare il banner "evaluation". Non metterla nel sorgente.
+- Licenza DevExtreme: **non serve in questa cartella** (verrà dal progetto ospite al reintegro). Il banner "evaluation" e il warning W0019 in console sono attesi: ignorali. Il supporto opzionale via `.env.local` (`VITE_DEVEXTREME_LICENSE_KEY`) resta in `main.js`; non mettere mai la chiave nel sorgente.
 - `npm install` · `npm run dev` (porta 5180, config `.claude/launch.json` → nome `dev`) · `npm run build`.
 
 ## Struttura
@@ -33,10 +33,10 @@ mantieni lo stesso stack e lo stesso stile di codice per rendere facile il ripor
 ## Sistema di coordinate
 - Origine Fingerprint = angolo **in basso a sinistra**, Y verso l'alto. Canvas ha Y verso il basso:
   ```js
-  cx(x, scale) = (x + MARGIN_DOTS) * scale
-  cy(y, scale) = (labelDots.h - y + MARGIN_DOTS) * scale
+  cx(x, scale) = x * scale
+  cy(y, scale) = (labelDots.h - y) * scale
   ```
-- `MARGIN_DOTS = 20`; `labelDots.w/h = mm × dotsPerMm`.
+- Il canvas coincide con l'etichetta (nessun margine né bordo disegnato; il bordo visivo è il `box-shadow` del canvas). Quello che esce dall'etichetta viene tagliato, come in stampa. `labelDots.w/h = mm × dotsPerMm`.
 - DPI: 203 → 8 dot/mm · 300 → 11.81 · 406 → 16. (Il default in `settings` è 11.87: probabile refuso di 11.81, non presente nella select.)
 
 ## Semantica DIR implementata
@@ -55,12 +55,16 @@ Nota dal manuale: DIR ruota l'oggetto **in senso orario attorno al punto di anco
 La tabella sopra è quella verificata empiricamente sulle etichette reali: non cambiarla senza confronto con una stampa.
 
 ## Barcode
-- `bwipScale = Math.max(1, Math.round((el.barcodeParams?.[2] || 1) * (el.barcodeMag || 1)))`, cache key `` `${bcid}|${bcText}|${bwipScale}` ``.
+- Stato parser: `barcodeNarrow` (default 1), `barcodeMag` (default 2), `barcodeHeight` (default 100). BARSET `[1]/[2]/[3]` e BR/BM/BH li impostano: **l'ultimo vince** (non si moltiplicano).
+- `bwipScale = narrow × mag` = dot per modulo. bwip-js disegna DataMatrix/QR/Aztec a **2 px per modulo** (`BWIP_2PX`, l'immagine viene dimezzata), i lineari e PDF417 a 1 px. `padding: 0` (l'ancoraggio è il simbolo, non la quiet zone).
+- Altezza lineari: `height` bwip in mm = `barcodeHeight / bwipScale × 25.4 / 72`; mai passarla ai 2D (`BWIP_2D`): bwip-js lancia un errore per valori < 0.01.
+- Cache key `` `${bcid}|${bcText}|${bwipScale}|${barcodeHeight}` ``.
 - `BCID_MAP`: DATAMATRIX, GS1DATAMATRIX, CODE128/A/B/C, CODE39, CODE93, EAN13, EAN8, EAN128/GS1-128, UPCA, UPCE, PDF417, MICROPDF417, AZTEC, QRCODE/QR, I2OF5/INT2OF5. Tipo sconosciuto → `code128`.
 - Variabili barcode: `isBarcodeVar`, `maxChars` → stringa random in `previewValue`, usata da `resolveContent(content, true)`.
 
 ## Font
 - Dimensione FT in punti: `sizePx = fontSize * (25.4/72) * dotsPerMm * scale`.
+- `FT "<font>",<size>,<slant>,<width %>`: il 4° parametro è la **larghezza %** (`fontWidth`, `ctx.scale` orizzontale), non un angolo. Slant ≠ 0 → italic.
 - Font non installati (`document.fonts.check`) → testo rosso + sottolineatura tratteggiata, fallback per categoria.
 
 ## Variabili fisse (FIXED_VAR_LABELS)
@@ -71,13 +75,12 @@ VAR19 Plant Id · VAR20 Plant Name · VAR21 Logo1 · VAR22 Logo2 · VAR23 Custom
 VAR25 Package Barcode · VAR26–28 Package Custom Field 1–3 · VAR29 Package Description.
 
 ## Parser (inline, nessuna dipendenza)
-Gestiti: LAYOUT INPUT/END/RUN, CLL, NASC, CLIP, DIR, AN, PP/PRPOS, FT, PT, PB, PM, PL/PRLINE, PX/PRBOX, BARSET, BM, BF.
+Gestiti: LAYOUT INPUT/END/RUN, CLL, NASC, CLIP, DIR, AN, PP/PRPOS, FT, PT, PB, PM, PL/PRLINE, PX/PRBOX, BARSET, BM/BARMAG, BH/BARHEIGHT, BR/BARRATIO, BF.
 Statement separati da `:` (non dentro `"`); contenuto PT/PB separato da `;`; `VAR5$` → `{type:'var', index:5}`,
 `"testo"` → `{type:'literal'}`, altro → `{type:'expr'}` (mostrato come `[expr]`). Comandi sconosciuti → `warnings`.
 
 ## Punti aperti
 1. **Offset fisico stampante**: 2–4 mm non stampabili a sinistra/in basso (dipende da X-Start e Feed adjust del setup, vedi manuale §3.2 "Origin"). Serve un offset configurabile (Xoff/Yoff in dot).
-2. **Dimensione barcode**: secondo il manuale `BARSET "<nome>",<wide>,<narrow>,<mag>,<height>,...` → `barcodeParams[2]` è la **magnification**, non la larghezza della barra stretta; la barra stretta in dot = `narrow × mag`. Moltiplicare anche per BM conta la magnification due volte se BARSET e BM sono entrambi presenti (l'ultimo dovrebbe vincere). Da verificare su etichette reali.
+2. **Dimensione barcode**: corretta secondo il manuale (modulo = narrow × mag, l'ultimo tra BARSET e BM vince). Da confermare su una stampa reale, soprattutto la dimensione del modulo del DataMatrix.
 3. **Logo BMP**: posizionamento dipende dal punto 1.
-4. **Altezza barcode lineari**: è `barcodeParams[3]` (default 100 dot, o BH). Non ancora passata a bwip-js (`height` in mm = dot / dotsPerMm).
-5. Altri scostamenti dal manuale elencati in `docs/fingerprint-reference.md` § "Discrepanze".
+4. Altri scostamenti dal manuale elencati in `docs/fingerprint-reference.md` § "Discrepanze".

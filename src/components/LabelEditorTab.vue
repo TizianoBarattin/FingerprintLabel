@@ -277,8 +277,9 @@ function parseContent(raw) {
 
 function parseLayout(source) {
   const result = { layoutName: null, charset: 'UTF-8', clip: false, elements: [], warnings: [] }
-  const st = { fontName: 'Swiss 721 BT', fontSize: 8, fontSlant: 0, fontAngle: 0,
-               x: 0, y: 0, dir: 1, align: 1, barcodeType: null, barcodeParams: [], barcodeMag: 1 }
+  const st = { fontName: 'Swiss 721 BT', fontSize: 8, fontSlant: 0, fontWidth: 100,
+               x: 0, y: 0, dir: 1, align: 1, barcodeType: null, barcodeParams: [],
+               barcodeNarrow: 1, barcodeMag: 2, barcodeHeight: 100 }  // default manuale §3.4
   let m
   for (const raw of source.split('\n')) {
     const line = raw.trim()
@@ -295,16 +296,18 @@ function parseLayout(source) {
       if ((m = s.match(/^(?:PP|PRPOS)\s*(\d+)\s*,\s*(\d+)/i))) { st.x = parseInt(m[1]); st.y = parseInt(m[2]); continue }
       if ((m = s.match(/^FT\s*"([^"]+)"(?:\s*,\s*(\d+))?(?:\s*,\s*(\d+))?(?:\s*,\s*(\d+))?/i))) {
         st.fontName = m[1]; st.fontSize = m[2] ? parseInt(m[2]) : 8
-        st.fontSlant = m[3] ? parseInt(m[3]) : 0; st.fontAngle = m[4] ? parseInt(m[4]) : 0; continue
+        // FT "<font>",<size pt>,<slant °>,<width %> (manuale p.25)
+        st.fontSlant = m[3] ? parseInt(m[3]) : 0; st.fontWidth = m[4] ? parseInt(m[4]) : 100; continue
       }
       if ((m = s.match(/^PT\s*(.*)/i))) {
         result.elements.push({ type: 'text', x: st.x, y: st.y, dir: st.dir, align: st.align,
-          fontName: st.fontName, fontSize: st.fontSize, fontSlant: st.fontSlant, fontAngle: st.fontAngle,
+          fontName: st.fontName, fontSize: st.fontSize, fontSlant: st.fontSlant, fontWidth: st.fontWidth,
           content: parseContent(m[1].trim()) }); st.align = 1; continue
       }
       if ((m = s.match(/^PB\s*(.*)/i))) {
         result.elements.push({ type: 'barcode', x: st.x, y: st.y, dir: st.dir, align: st.align,
-          barcodeType: st.barcodeType, barcodeParams: [...st.barcodeParams], barcodeMag: st.barcodeMag,
+          barcodeType: st.barcodeType, barcodeParams: [...st.barcodeParams],
+          barcodeNarrow: st.barcodeNarrow, barcodeMag: st.barcodeMag, barcodeHeight: st.barcodeHeight,
           content: parseContent(m[1].trim()) }); st.align = 1; continue
       }
       if ((m = s.match(/^PM\s*"([^"]+)"/i))) {
@@ -321,9 +324,16 @@ function parseLayout(source) {
       if ((m = s.match(/^BARSET\s*"([^"]+)"(?:\s*,\s*(.+))?/i))) {
         st.barcodeType = m[1]
         st.barcodeParams = m[2] ? m[2].split(',').map(p => { p = p.trim(); return isNaN(p) ? p : parseInt(p) }) : []
+        // [0] wide, [1] narrow, [2] mag, [3] height: l'ultimo tra BARSET e BM/BR/BH vince
+        const [, narrow, mag, height] = st.barcodeParams
+        if (Number.isInteger(narrow)) st.barcodeNarrow = narrow
+        if (Number.isInteger(mag))    st.barcodeMag    = mag
+        if (Number.isInteger(height)) st.barcodeHeight = height
         continue
       }
-      if ((m = s.match(/^BM\s*(\d+)/i))) { st.barcodeMag = parseInt(m[1]); continue }
+      if ((m = s.match(/^(?:BM|BARMAG)\s*(\d+)/i)))    { st.barcodeMag = parseInt(m[1]); continue }
+      if ((m = s.match(/^(?:BH|BARHEIGHT)\s*(\d+)/i))) { st.barcodeHeight = parseInt(m[1]); continue }
+      if ((m = s.match(/^(?:BR|BARRATIO)\s*\d+\s*,\s*(\d+)/i))) { st.barcodeNarrow = parseInt(m[1]); continue }
       if (/^BF\s+(ON|OFF)/i.test(s)) continue
       result.warnings.push(s)
     }
@@ -374,6 +384,9 @@ const BCID_MAP = {
   'I2OF5': 'interleaved2of5', 'INT2OF5': 'interleaved2of5',
 }
 function getBcid(t) { return t ? (BCID_MAP[(t || '').toUpperCase()] || 'code128') : 'code128' }
+// bwip-js disegna questi 2D a 2 px per modulo (a scale 1), i lineari e PDF417 a 1 px
+const BWIP_2PX = new Set(['datamatrix', 'gs1datamatrix', 'qrcode', 'azteccode'])
+const BWIP_2D  = new Set([...BWIP_2PX, 'pdf417', 'micropdf417'])  // niente BH/height
 
 function applySettings() {
   labelDots.w = Math.round(settings.widthMm  * settings.dotsPerMm)
@@ -561,19 +574,16 @@ function onImageFile(filename, e) {
 
 // ── Canvas rendering ───────────────────────────────────────────────────────
 
-const MARGIN_DOTS = 20
-
 function getScale() {
   const c = canvasContainer.value; if (!c) return 1
   const maxW = c.clientWidth  - 20
   const maxH = c.clientHeight - 20
-  const w = labelDots.w + MARGIN_DOTS * 2
-  const h = labelDots.h + MARGIN_DOTS * 2
-  return Math.min(maxW / w, maxH / h, 2)
+  return Math.min(maxW / labelDots.w, maxH / labelDots.h, 2)
 }
 
-function cx(x, scale) { return (x + MARGIN_DOTS) * scale }
-function cy(y, scale) { return (labelDots.h - y + MARGIN_DOTS) * scale }
+// Canvas = sola etichetta: origine Fingerprint in basso a sinistra, Y verso l'alto
+function cx(x, scale) { return x * scale }
+function cy(y, scale) { return (labelDots.h - y) * scale }
 
 const AN = {
   1: { a: 'left',   b: 'bottom' },
@@ -657,8 +667,8 @@ function renderCanvas() {
   if (!canvas || !parsed.value) return
 
   const scale = getScale()
-  const W = Math.round((labelDots.w + MARGIN_DOTS * 2) * scale)
-  const H = Math.round((labelDots.h + MARGIN_DOTS * 2) * scale)
+  const W = Math.round(labelDots.w * scale)
+  const H = Math.round(labelDots.h * scale)
 
   // Ridimensiona solo se le dimensioni sono cambiate: evita il flash bianco
   if (canvas.width !== W || canvas.height !== H) {
@@ -669,10 +679,6 @@ function renderCanvas() {
   const ctx = canvas.getContext('2d')
   ctx.fillStyle = '#fff'
   ctx.fillRect(0, 0, W, H)
-
-  ctx.strokeStyle = '#d0d0d0'
-  ctx.lineWidth = 1
-  ctx.strokeRect(MARGIN_DOTS * scale, MARGIN_DOTS * scale, labelDots.w * scale, labelDots.h * scale)
 
   for (const el of parsed.value.elements) {
     drawEl(ctx, el, scale)
@@ -691,7 +697,7 @@ function drawEl(ctx, el, scale) {
     ctx.fillStyle    = isMissing ? '#dc2626' : '#000'
     ctx.textAlign    = anInfo.a
     ctx.textBaseline = anInfo.b
-    if (el.fontAngle) ctx.rotate(-(el.fontAngle * Math.PI / 180))
+    if (el.fontWidth && el.fontWidth !== 100) ctx.scale(el.fontWidth / 100, 1)  // larghezza % orizzontale
     ctx.fillText(resolveContent(el.content), 0, 0)
     // Sottolineatura tratteggiata rossa per font mancanti
     if (isMissing) {
@@ -731,21 +737,25 @@ function drawEl(ctx, el, scale) {
   } else if (el.type === 'barcode') {
     const bcText = resolveContent(el.content, true)
     const bcid   = getBcid(el.barcodeType)
-    // BARSET param[2] = narrow bar width in dots; BM = magnification
-    // bwipScale = dots per module → determina la dimensione fisica del barcode
-    const bwipScale = Math.max(1, Math.round((el.barcodeParams?.[2] || 1) * (el.barcodeMag || 1)))
-    const cacheKey = `${bcid}|${bcText}|${bwipScale}`
+    // Barra stretta / modulo 2D in dot = narrow × mag (manuale §3.4) → bwipScale = dot per modulo
+    const bwipScale = Math.max(1, Math.round((el.barcodeNarrow || 1) * (el.barcodeMag || 1)))
+    const cacheKey = `${bcid}|${bcText}|${bwipScale}|${el.barcodeHeight}`
     let offCanvas = barcodeCache.get(cacheKey)
     if (!offCanvas && bwipjsLib && bcText && !bcText.startsWith('[')) {
       try {
         offCanvas = document.createElement('canvas')
-        bwipjsLib.toCanvas(offCanvas, { bcid, text: bcText, scale: bwipScale, padding: 2 })
+        // height bwip-js in mm a 72 dpi × scale → altezza barre = barcodeHeight dot (solo lineari)
+        const opts = { bcid, text: bcText, scale: bwipScale, padding: 0 }
+        if (!BWIP_2D.has(bcid)) opts.height = (el.barcodeHeight || 100) / bwipScale * 25.4 / 72
+        bwipjsLib.toCanvas(offCanvas, opts)
         barcodeCache.set(cacheKey, offCanvas)
       } catch { offCanvas = null; barcodeCache.set(cacheKey, null) }
     }
     if (offCanvas) {
-      const bh = offCanvas.height * scale
-      const bw = offCanvas.width  * scale
+      const k  = BWIP_2PX.has(bcid) ? 2 : 1
+      const bh = offCanvas.height / k * scale
+      const bw = offCanvas.width  / k * scale
+      ctx.imageSmoothingEnabled = false
       const d  = el.dir || 1
       if (d === 3) {
         // anchor = L-corner (top-right): rotate 180° so L-corner meets anchor

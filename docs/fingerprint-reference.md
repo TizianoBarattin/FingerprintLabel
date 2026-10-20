@@ -48,10 +48,10 @@ Riassunto dal manuale (`docs/intermec-direct-protocol-v8.txt`, pagine citate com
 - `NASC "<charset>"` – set caratteri (es. "UTF-8").
 
 ## Discrepanze tra codice attuale e manuale
-1. **FT 4° parametro** = larghezza % (default 100), il parser lo usa come `fontAngle` e ruota il testo. Default size: manuale 12, parser 8.
-2. **BARSET `[2]`** è la magnification, non la larghezza barra stretta; `BM` la sovrascrive (non va moltiplicata). Altezza = `[3]` / `BH`, non passata a bwip-js.
+1. ~~FT 4° parametro usato come angolo~~ — **risolto**: è `fontWidth` (larghezza %, default 100), resa con `ctx.scale(w/100, 1)`. Resta: default size manuale 12, parser 8.
+2. ~~BARSET `[2]` trattato come larghezza barra~~ — **risolto**: modulo = narrow × mag, BARSET/BM/BR/BH si sovrascrivono (l'ultimo vince), altezza passata a bwip-js per i lineari.
 3. **AN** applicato solo al testo; il manuale lo prevede anche per barcode, immagini, box, linee.
-4. **DIR sul testo** non ruota il testo (si usa solo `fontAngle`); il manuale prevede rotazione oraria di 90° per step.
-5. Comandi non gestiti dal parser (finiscono in `warnings`): BT, BH, BR, MAG, II/NI, XORMODE, PF, FORMFEED, `BARSET #n`, `BF "<font>"... ON`, PX con testo multi-riga, dati `CNTn$`/`DATE$`/`TIME$` (mostrati come `[expr]`).
+4. **DIR sul testo** non ruota il testo; il manuale prevede rotazione oraria di 90° per step.
+5. Comandi non gestiti dal parser (finiscono in `warnings`): BT, MAG, II/NI, XORMODE, PF, FORMFEED, `BARSET #n`, `BF "<font>"... ON`, PX con testo multi-riga, dati `CNTn$`/`DATE$`/`TIME$` (mostrati come `[expr]`).
 6. `BCID_MAP` manca di vari tipi del manuale (CODE39A/C, INT2OF5C, UCC128, CODABAR, MAXICODE, …); il default del protocollo è INT2OF5, il fallback del codice è code128.
 7. `PM VARn$` (immagine da variabile) non riconosciuto: la regex PM richiede un nome tra virgolette.
