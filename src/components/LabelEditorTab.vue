@@ -244,27 +244,20 @@ const FIXED_VAR_LABELS = {
 
 // ── Parser inline ──────────────────────────────────────────────────────────
 
-function splitStmt(line) {
-  const parts = []; let cur = '', inQ = false
-  for (const ch of line) {
-    if (ch === '"')             { inQ = !inQ; cur += ch }
-    else if (ch === ':' && !inQ) { parts.push(cur.trim()); cur = '' }
-    else                          { cur += ch }
-  }
-  if (cur.trim()) parts.push(cur.trim())
-  return parts
-}
-
-function splitSemi(str) {
+// Divide su `sep` fuori dalle virgolette
+function splitOutQ(str, sep) {
   const parts = []; let cur = '', inQ = false
   for (const ch of str) {
     if (ch === '"')             { inQ = !inQ; cur += ch }
-    else if (ch === ';' && !inQ) { parts.push(cur.trim()); cur = '' }
+    else if (ch === sep && !inQ) { parts.push(cur.trim()); cur = '' }
     else                          { cur += ch }
   }
   if (cur.trim()) parts.push(cur.trim())
   return parts
 }
+const splitStmt = line => splitOutQ(line, ':')
+const splitSemi = str  => splitOutQ(str, ';')
+const unquote   = s    => s?.startsWith('"') && s.endsWith('"') ? s.slice(1, -1) : null
 
 function parseContent(raw) {
   return splitSemi(raw).filter(s => s !== '').map(s => {
@@ -299,27 +292,35 @@ function parseLayout(source) {
         // FT "<font>",<size pt>,<slant °>,<width %> (manuale p.25)
         st.fontSlant = m[3] ? parseInt(m[3]) : 0; st.fontWidth = m[4] ? parseInt(m[4]) : 100; continue
       }
+      // AN e DIR restano validi fino a PF (manuale p.21): non si resettano dopo ogni oggetto
+      const font = () => ({ fontName: st.fontName, fontSize: st.fontSize, fontSlant: st.fontSlant, fontWidth: st.fontWidth })
       if ((m = s.match(/^PT\s*(.*)/i))) {
-        result.elements.push({ type: 'text', x: st.x, y: st.y, dir: st.dir, align: st.align,
-          fontName: st.fontName, fontSize: st.fontSize, fontSlant: st.fontSlant, fontWidth: st.fontWidth,
-          content: parseContent(m[1].trim()) }); st.align = 1; continue
+        result.elements.push({ type: 'text', x: st.x, y: st.y, dir: st.dir, align: st.align, ...font(),
+          content: parseContent(m[1].trim()) }); continue
       }
       if ((m = s.match(/^PB\s*(.*)/i))) {
         result.elements.push({ type: 'barcode', x: st.x, y: st.y, dir: st.dir, align: st.align,
           barcodeType: st.barcodeType, barcodeParams: [...st.barcodeParams],
           barcodeNarrow: st.barcodeNarrow, barcodeMag: st.barcodeMag, barcodeHeight: st.barcodeHeight,
-          content: parseContent(m[1].trim()) }); st.align = 1; continue
+          content: parseContent(m[1].trim()) }); continue
       }
       if ((m = s.match(/^PM\s*"([^"]+)"/i))) {
-        result.elements.push({ type: 'image', x: st.x, y: st.y, dir: st.dir, align: st.align, filename: m[1] }); st.align = 1; continue
+        result.elements.push({ type: 'image', x: st.x, y: st.y, dir: st.dir, align: st.align, filename: m[1] }); continue
       }
       if ((m = s.match(/^(?:PL|PRLINE)\s*(\d+)\s*,\s*(\d+)/i))) {
         result.elements.push({ type: 'line', x: st.x, y: st.y, dir: st.dir, align: st.align,
-          length: parseInt(m[1]), thickness: parseInt(m[2]) }); st.align = 1; continue
+          length: parseInt(m[1]), thickness: parseInt(m[2]) }); continue
       }
-      if ((m = s.match(/^(?:PX|PRBOX)\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i))) {
-        result.elements.push({ type: 'box', x: st.x, y: st.y, dir: st.dir, align: st.align,
-          height: parseInt(m[1]), width: parseInt(m[2]), thickness: parseInt(m[3]) }); st.align = 1; continue
+      // PX <h>,<w>,<spessore>[,<dato>[,<off h>[,<off v>[,"<delimitatore>"[,"<sillabazione>"]]]]]
+      if ((m = s.match(/^(?:PX|PRBOX)\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)(?:\s*,\s*(.+))?/i))) {
+        const box = { type: 'box', x: st.x, y: st.y, dir: st.dir, align: st.align,
+          height: parseInt(m[1]), width: parseInt(m[2]), thickness: parseInt(m[3]) }
+        if (m[4]) {
+          const [data, hOff, vOff, delim] = splitOutQ(m[4], ',')
+          Object.assign(box, font(), { content: parseContent(data),
+            hOff: parseInt(hOff) || 0, vOff: parseInt(vOff) || 0, delim: unquote(delim) })
+        }
+        result.elements.push(box); continue
       }
       if ((m = s.match(/^BARSET\s*"([^"]+)"(?:\s*,\s*(.+))?/i))) {
         st.barcodeType = m[1]
@@ -351,8 +352,16 @@ const labelCanvas     = ref(null)
 const layoutSource  = ref('')
 const parsed        = ref(null)
 const parseWarnings = ref([])
-const variables     = ref([])   // { index, label, value }
-const images        = ref([])   // { filename, dataUrl, img }
+const variables     = ref([])   // { index, label, value } – solo quelle presenti nel layout
+const images        = ref([])   // { filename, dataUrl, img } – solo quelle presenti nel layout
+// Memoria di pagina: valori, impostazioni barcode e immagini restano anche se tolti dal layout
+const varStore      = reactive({})  // index → oggetto variabile
+const imageStore    = reactive({})  // filename → { filename, dataUrl, img }
+
+function storedVar(index, label = '') {
+  return varStore[index] ??= { index, label, value: '', fixedLabel: FIXED_VAR_LABELS[index] ?? null,
+    isBarcodeVar: false, barcodeType: null, maxChars: null, previewValue: null }
+}
 
 const settings     = reactive({ widthMm: 70, heightMm: 50, dotsPerMm: 11.87 })
 const labelDots    = reactive({ w: 70 * 11.87, h: 50 * 11.87 })
@@ -454,8 +463,7 @@ function onSourceInput() {
 async function checkFonts() {
   const names = [...new Set(
     parsed.value.elements
-      .filter(e => e.type === 'text')
-      .map(e => e.fontName)
+      .map(e => e.fontName)   // testi e PX con testo
       .filter(Boolean)
   )]
   const missing = new Set()
@@ -477,11 +485,8 @@ function buildVariables() {
     for (const p of el.content) {
       if (p.type === 'literal') { lastLit = p.value.replace(/:\s*$/, '').trim() }
       else if (p.type === 'var') {
-        if (!map[p.index]) map[p.index] = {
-          index: p.index, label: lastLit || '', value: '',
-          fixedLabel: FIXED_VAR_LABELS[p.index] ?? null,
-          isBarcodeVar: false, barcodeType: null, maxChars: null, previewValue: null
-        }
+        // Valore, etichetta e max chars vengono da varStore; tipo barcode ricalcolato a ogni parse
+        if (!map[p.index]) map[p.index] = Object.assign(storedVar(p.index, lastLit), { isBarcodeVar: false, barcodeType: null })
         if (el.type === 'barcode') {
           map[p.index].isBarcodeVar = true
           if (!map[p.index].barcodeType) map[p.index].barcodeType = el.barcodeType
@@ -490,14 +495,7 @@ function buildVariables() {
       }
     }
   }
-  const prev = Object.fromEntries(variables.value.map(v => [v.index, v]))
-  variables.value = Object.values(map).sort((a, b) => a.index - b.index).map(v => ({
-    ...v,
-    label: prev[v.index]?.label ?? v.label,
-    value: prev[v.index]?.value ?? '',
-    maxChars: prev[v.index]?.maxChars ?? null,
-    previewValue: prev[v.index]?.previewValue ?? null,
-  }))
+  variables.value = Object.values(map).sort((a, b) => a.index - b.index)
 }
 
 // ── Immagini ───────────────────────────────────────────────────────────────
@@ -506,8 +504,7 @@ function buildImages() {
   const names = [...new Set(
     parsed.value.elements.filter(e => e.type === 'image').map(e => e.filename)
   )]
-  const prev = Object.fromEntries(images.value.map(i => [i.filename, i]))
-  images.value = names.map(f => prev[f] ?? { filename: f, dataUrl: null, img: null })
+  images.value = names.map(f => imageStore[f] ??= { filename: f, dataUrl: null, img: null })
 }
 
 // ── Import variabili JSON ──────────────────────────────────────────────────
@@ -518,16 +515,16 @@ function onVarsFile(e) {
   reader.onload = ev => {
     try {
       const data = JSON.parse(ev.target.result)
+      // Salva tutto in varStore, anche le variabili non (ancora) presenti nel layout
       if (Array.isArray(data)) {
         data.forEach(item => {
-          const v = variables.value.find(v => v.index === item.index)
-          if (v) { v.value = item.value ?? ''; if (item.label) v.label = item.label }
+          if (!(item.index > 0)) return
+          const v = storedVar(item.index); v.value = item.value ?? ''; if (item.label) v.label = item.label
         })
       } else {
         Object.entries(data).forEach(([k, val]) => {
           const idx = parseInt(k.replace(/^VAR/i, ''))
-          const v = variables.value.find(v => v.index === idx)
-          if (v) v.value = String(val)
+          if (idx > 0) storedVar(idx).value = String(val)
         })
       }
       nextTick(renderCanvas)
@@ -540,7 +537,10 @@ function onVarsFile(e) {
 // ── Export variabili JSON ──────────────────────────────────────────────────
 
 function exportVarsJson() {
-  const data = variables.value.map(v => ({ index: v.index, label: v.label, value: v.value }))
+  // Esporta anche le variabili memorizzate ma ora assenti dal layout, purché abbiano un valore
+  const shown = new Set(variables.value.map(v => v.index))
+  const data = Object.values(varStore).filter(v => shown.has(v.index) || v.value)
+    .sort((a, b) => a.index - b.index).map(v => ({ index: v.index, label: v.label, value: v.value }))
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
   const a = Object.assign(document.createElement('a'), {
     href: URL.createObjectURL(blob), download: 'variabili.json'
@@ -562,7 +562,7 @@ function onImageFile(filename, e) {
   reader.onload = ev => {
     const img = new Image()
     img.onload = () => {
-      const entry = images.value.find(i => i.filename === filename)
+      const entry = imageStore[filename]
       if (entry) { entry.dataUrl = ev.target.result; entry.img = img }
       nextTick(renderCanvas)
     }
@@ -595,6 +595,35 @@ const AN = {
   7: { a: 'left',   b: 'top'    },
   8: { a: 'center', b: 'top'    },
   9: { a: 'right',  b: 'top'    },
+}
+
+// AN → frazione [fx, fy] dell'oggetto (da sinistra, dal basso) che coincide col PP
+function anFrac(align) { const a = (AN[align] ? align : 1) - 1; return [(a % 3) / 2, Math.floor(a / 3) / 2] }
+const dirRad = el => ((el.dir || 1) - 1) * Math.PI / 2   // DIR = rotazione oraria di 90° per step
+// PX: il PP sta sempre sul lato basso del box, AN sceglie solo sx/centro/dx (verificato su stampa).
+// La riga di AN (basso/metà/alto) vale solo per il testo dentro il box.
+const boxAlign = el => ({ ...el, align: ((AN[el.align] ? el.align : 1) - 1) % 3 + 1 })
+
+// Sposta l'origine così che il punto AN dell'oggetto w×h (riferimento DIR 1: verso destra e verso l'alto)
+// cada sul PP; l'offset ruota con DIR. AN 1 → nessuno spostamento.
+function applyAlign(ctx, el, w, h) {
+  const [fx, fy] = anFrac(el.align), r = dirRad(el)
+  const dx = -fx * w, dy = fy * h
+  ctx.translate(dx * Math.cos(r) - dy * Math.sin(r), dx * Math.sin(r) + dy * Math.cos(r))
+}
+
+// Righe di un PX con testo: a capo su delimitatore/CR-LF, poi a parola sulla larghezza (max 20 righe)
+function wrapLines(ctx, text, delim, maxW, kx) {
+  const out = []
+  for (const para of delim ? text.split(delim) : text.split(/\r?\n/)) {
+    let line = ''
+    for (const word of para.split(/(?<=[\s-])/)) {
+      if (line && ctx.measureText(line + word).width * kx > maxW) { out.push(line.trimEnd()); line = word.trimStart() }
+      else line += word
+    }
+    out.push(line.trimEnd())
+  }
+  return out.slice(0, 20)
 }
 
 const PT_TO_MM = 25.4 / 72  // Fingerprint font size è in punti tipografici
@@ -685,6 +714,37 @@ function renderCanvas() {
   }
 }
 
+// PX con testo multi-riga: AN posiziona il box sul PP e allinea il testo dentro il box (manuale p.22, 40).
+// Disegnato nel riferimento DIR 1 e poi ruotato con DIR.
+function drawTextBox(ctx, el, scale) {
+  const w = el.width * scale, h = el.height * scale, t = el.thickness * scale
+  const [fx, fy] = anFrac(el.align)
+  ctx.rotate(dirRad(el))
+  ctx.translate(-fx * w, 0)                 // box: x 0…w, y −h…0 (PP sul lato basso, vedi boxAlign)
+  if (t > 0) {
+    ctx.strokeStyle = '#000'; ctx.lineWidth = t
+    ctx.strokeRect(t / 2, -h + t / 2, w - t, h - t)
+  }
+  const { css, sizePx } = fontCss(el, scale)
+  const isMissing = missingFonts.value.has(el.fontName)
+  const kx = (el.fontWidth || 100) / 100
+  ctx.font = css; ctx.fillStyle = isMissing ? '#dc2626' : '#000'
+  ctx.textAlign = AN[el.align]?.a || 'left'; ctx.textBaseline = 'top'
+  // Cornice del testo: bordo interno + offset; vOff è anche lo spazio fra le righe
+  const inH = t + el.hOff * scale, inV = t + el.vOff * scale, gap = el.vOff * scale
+  const frameW = w - 2 * inH, frameH = h - 2 * inV
+  const lines = wrapLines(ctx, resolveContent(el.content), el.delim, frameW, kx)
+  const blockH = lines.length * sizePx + (lines.length - 1) * gap
+  const x0 = inH + fx * frameW
+  const y0 = -h + inV + (1 - fy) * (frameH - blockH)
+  lines.forEach((line, i) => {
+    ctx.save()
+    ctx.translate(x0, y0 + i * (sizePx + gap)); ctx.scale(kx, 1)
+    ctx.fillText(line, 0, 0)
+    ctx.restore()
+  })
+}
+
 function drawEl(ctx, el, scale) {
   ctx.save()
   ctx.translate(cx(el.x, scale), cy(el.y, scale))
@@ -697,6 +757,7 @@ function drawEl(ctx, el, scale) {
     ctx.fillStyle    = isMissing ? '#dc2626' : '#000'
     ctx.textAlign    = anInfo.a
     ctx.textBaseline = anInfo.b
+    ctx.rotate(dirRad(el))   // DIR 2/3/4: testo ruotato in senso orario attorno al PP
     if (el.fontWidth && el.fontWidth !== 100) ctx.scale(el.fontWidth / 100, 1)  // larghezza % orizzontale
     ctx.fillText(resolveContent(el.content), 0, 0)
     // Sottolineatura tratteggiata rossa per font mancanti
@@ -719,20 +780,23 @@ function drawEl(ctx, el, scale) {
     ctx.fillStyle = '#000'
     const len   = el.length    * scale
     const thick = Math.max(1, el.thickness * scale)
-    if      (el.dir === 1) ctx.fillRect(0,        -thick / 2, len,   thick)  // right
-    else if (el.dir === 3) ctx.fillRect(-len,      -thick / 2, len,   thick)  // left
-    else if (el.dir === 2) ctx.fillRect(-thick / 2,  0,       thick,  len)   // down (↓ = +canvas Y)
-    else                   ctx.fillRect(-thick / 2, -len,     thick,  len)   // up   (↑ = -canvas Y)
+    applyAlign(ctx, el, len, thick)
+    ctx.rotate(dirRad(el))   // DIR 1 destra · 2 giù · 3 sinistra · 4 su
+    ctx.fillRect(0, -thick / 2, len, thick)
+
+  } else if (el.type === 'box' && el.content) {
+    drawTextBox(ctx, el, scale)
 
   } else if (el.type === 'box') {
     ctx.strokeStyle = '#000'
     ctx.lineWidth   = Math.max(1, el.thickness * scale)
     const bxW = el.width * scale, bxH = el.height * scale
-    const d = el.dir || 1
-    if      (d === 3) ctx.strokeRect(-bxW, -bxH, bxW, bxH)  // left, up
-    else if (d === 2) ctx.strokeRect(0,     0,    bxW, bxH)  // right, down
-    else if (d === 4) ctx.strokeRect(-bxW,  0,    bxW, bxH)  // left, down
-    else              ctx.strokeRect(0,    -bxH,  bxW, bxH)  // DIR1: right, up
+    applyAlign(ctx, boxAlign(el), bxW, bxH)
+    // width lungo la direzione, height perpendicolare; rotazione oraria DIR (verificato su stampa)
+    ctx.rotate(dirRad(el))
+    const t = ctx.lineWidth   // bordo tutto dentro le dimensioni, come in drawTextBox
+    if (2 * t >= Math.min(bxW, bxH)) { ctx.fillStyle = '#000'; ctx.fillRect(0, -bxH, bxW, bxH) }  // box pieno
+    else ctx.strokeRect(t / 2, -bxH + t / 2, bxW - t, bxH - t)
 
   } else if (el.type === 'barcode') {
     const bcText = resolveContent(el.content, true)
@@ -756,34 +820,16 @@ function drawEl(ctx, el, scale) {
       const bh = offCanvas.height / k * scale
       const bw = offCanvas.width  / k * scale
       ctx.imageSmoothingEnabled = false
-      const d  = el.dir || 1
-      if (d === 3) {
-        // anchor = L-corner (top-right): rotate 180° so L-corner meets anchor
-        ctx.save()
-        ctx.translate(-bw / 2, bh / 2)   // center of target area
-        ctx.rotate(Math.PI)
-        ctx.drawImage(offCanvas, -bw / 2, -bh / 2, bw, bh)
-        ctx.restore()
-      } else if (d === 2) {
-        // anchor = top-left: rotated 90° CW, expands right and down
-        ctx.save()
-        ctx.rotate(Math.PI / 2)
-        ctx.drawImage(offCanvas, 0, -bh, bw, bh)
-        ctx.restore()
-      } else if (d === 4) {
-        // anchor = bottom-right: rotated 90° CCW, expands left and up
-        ctx.save()
-        ctx.rotate(-Math.PI / 2)
-        ctx.drawImage(offCanvas, -bw, 0, bw, bh)
-        ctx.restore()
-      } else {
-        // DIR 1 (default): anchor = bottom-left, expands right and up
-        ctx.drawImage(offCanvas, 0, -bh, bw, bh)
-      }
+      applyAlign(ctx, el, bw, bh)
+      // Lato-L (angolo in basso a sx in DIR 1) sul PP, poi rotazione oraria DIR (verificato su stampa):
+      // DIR 1 destra-su · 2 destra-giù · 3 sinistra-giù · 4 sinistra-su
+      ctx.rotate(dirRad(el))
+      ctx.drawImage(offCanvas, 0, -bh, bw, bh)
     } else {
       // Fallback placeholder
       const mag = el.barcodeMag || 1
       const sz  = Math.max(30, 50 * mag * 0.15) * scale
+      applyAlign(ctx, { ...el, dir: 1 }, sz, sz)   // il segnaposto non ruota
       ctx.fillStyle   = '#f7f7f7'
       ctx.strokeStyle = '#999'
       ctx.lineWidth   = 1
@@ -808,12 +854,15 @@ function drawEl(ctx, el, scale) {
       const imgW = entry.img.naturalWidth  * scale
       const imgH = entry.img.naturalHeight * scale
       const d    = el.dir || 1
+      // BMP già ruotato (.2 per DIR 2/4): lungo la direzione c'è la sua altezza
+      if (d % 2) applyAlign(ctx, el, imgW, imgH); else applyAlign(ctx, el, imgH, imgW)
       if      (d === 3) ctx.drawImage(entry.img, -imgW,    0, imgW, imgH)
       else if (d === 2) ctx.drawImage(entry.img,     0,    0, imgW, imgH)
       else if (d === 4) ctx.drawImage(entry.img, -imgW, -imgH, imgW, imgH)
       else              ctx.drawImage(entry.img,     0, -imgH, imgW, imgH)
     } else {
       const w = 80 * scale, h = 28 * scale
+      applyAlign(ctx, { ...el, dir: 1 }, w, h)   // il segnaposto non ruota
       ctx.fillStyle   = '#f9f9f9'
       ctx.strokeStyle = '#bbb'
       ctx.setLineDash([3, 2])

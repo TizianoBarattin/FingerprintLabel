@@ -50,8 +50,11 @@ Riassunto dal manuale (`docs/intermec-direct-protocol-v8.txt`, pagine citate com
 ## Discrepanze tra codice attuale e manuale
 1. ~~FT 4° parametro usato come angolo~~ — **risolto**: è `fontWidth` (larghezza %, default 100), resa con `ctx.scale(w/100, 1)`. Resta: default size manuale 12, parser 8.
 2. ~~BARSET `[2]` trattato come larghezza barra~~ — **risolto**: modulo = narrow × mag, BARSET/BM/BR/BH si sovrascrivono (l'ultimo vince), altezza passata a bwip-js per i lineari.
-3. **AN** applicato solo al testo; il manuale lo prevede anche per barcode, immagini, box, linee.
-4. **DIR sul testo** non ruota il testo; il manuale prevede rotazione oraria di 90° per step.
-5. Comandi non gestiti dal parser (finiscono in `warnings`): BT, MAG, II/NI, XORMODE, PF, FORMFEED, `BARSET #n`, `BF "<font>"... ON`, PX con testo multi-riga, dati `CNTn$`/`DATE$`/`TIME$` (mostrati come `[expr]`).
+3. ~~AN solo sul testo~~ — **risolto**: `applyAlign` applica AN a barcode, immagini, box e linee (offset nel riferimento DIR 1, ruotato con DIR). AN non si resetta più dopo ogni oggetto (vale fino a PF).
+4. ~~DIR sul testo ignorato~~ — **risolto**: testo ruotato in senso orario di 90° per step attorno al PP.
+5. Comandi non gestiti dal parser (finiscono in `warnings`): BT, MAG, II/NI, XORMODE, PF, FORMFEED, `BARSET #n`, `BF "<font>"... ON`, dati `CNTn$`/`DATE$`/`TIME$` (mostrati come `[expr]`).
 6. `BCID_MAP` manca di vari tipi del manuale (CODE39A/C, INT2OF5C, UCC128, CODABAR, MAXICODE, …); il default del protocollo è INT2OF5, il fallback del codice è code128.
 7. `PM VARn$` (immagine da variabile) non riconosciuto: la regex PM richiede un nome tra virgolette.
+8. **PX multi-riga** gestito (`drawTextBox`): a capo su CR/LF o delimitatore, poi a parola sulla larghezza; max 20 righe; interlinea = vOff. Non gestiti: stringa di sillabazione, sillabazione oltre spazi/trattini.
+9. ~~DIR su box e barcode DIR 4 diversi dal manuale~~ — **risolto e verificato su stampa** (2026-10-21): tutti gli oggetti ruotano in senso orario attorno al PP, come da manuale.
+10. **AN sui box (PX)**, verificato su stampa (2026-10-23): il PP sta sempre sul lato basso del box, AN sceglie solo sx/centro/dx; la riga di AN allinea solo il testo dentro. Implementato con `boxAlign`.
