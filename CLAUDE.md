@@ -61,11 +61,28 @@ La vecchia tabella "empirica" (box non ruotati, DIR 3/4 scambiati, DataMatrix DI
 - **Box PX e AN** (verificato su stampa, `docs/samples/test-an-pxtesto.lbl`, 2026-10-23): il PP sta **sempre sul lato basso** del box,
   AN sceglie solo il punto orizzontale (sx/centro/dx, `boxAlign`); la riga di AN (basso/metà/alto) vale solo per il testo dentro (`drawTextBox`).
   Es. `AN 7:PX 72,…` → box **sopra** il PP con testo in alto a sx; `AN 5` → PP al centro del lato basso, testo centrato.
-- AN su testo, barcode, linee e immagini: segue il manuale (9 punti), non ancora verificato su stampa.
+- **AN su testo, barcode, linee, immagini** (verificato su stampa, `docs/samples/test-an-oggetti-bf.lbl`, 2026-10-23):
+  - Barcode e immagini: AN completo a 9 punti sul rettangolo dell'oggetto.
+  - Linee: come i box, PP sul lato basso (la linea sta **sopra** il PP), AN sceglie solo sx/centro/dx.
+  - Testo: orizzontale sx/centro/dx; verticale AN 1-3 = **fondo cella**, 4-6 = **linea di base**, 7-9 = **cima cella**.
+    Cella misurata: `CELL_ASC` 1.1 em sopra la base, `CELL_DESC` 0.2 em sotto (em = dimensione FT in dot), `textBaselineY`.
+- **BF ON / BARFONT** (solo lineari): testo leggibile = dato del barcode, allineato a sx sotto le barre; campo = barre + offset (default 6) + cella testo,
+  AN vale per tutto il campo. Default barfont Swiss 721 BT 12 pt. Stato parser `barFont { on, name, size, slant, offset }`.
+- **Cursore dopo un oggetto**: la stampante sposta il punto di inserimento sul bordo destro dell'oggetto stampato (stessa Y).
+  L'editor **non** lo simula: un oggetto senza `PP` davanti viene disegnato sul PP precedente.
+- **Riga di `LAYOUT INPUT`**: un `FT` messo sulla stessa riga dopo `LAYOUT INPUT` è stato **ignorato** dalla stampante (testi usciti col font di default).
+  L'editor ignora **tutte** le istruzioni dopo `LAYOUT INPUT` su quella riga e mostra `Ignorato (riga LAYOUT INPUT): …` negli avvisi,
+  tranne quelle che non cambiano i default (`NASC`, `DIR 1`, `AN 1`, `CLIP OFF`, `BF OFF`), ignorate senza avviso. Gli avvisi parser sono elencati sotto la textarea.
+- Font di default FT: **12 pt** (manuale e stampa).
+- `II`/`INVIMAGE` … `NI`/`NORIMAGE`: testo bianco su cella nera (stato `invert` su testi e PX con testo).
+- Pulsante **"Nascondi variabili vuote"** (`hideEmpty`): variabile vuota → niente (come in stampa) invece di `[VARn]`;
+  barcode con dato vuoto e logo variabile vuoto non disegnano il segnaposto. Un barcode con `previewValue` (Max chars) resta visibile.
 
 ## Barcode
-- Stato parser: `barcodeNarrow` (default 1), `barcodeMag` (default 2), `barcodeHeight` (default 100). BARSET `[1]/[2]/[3]` e BR/BM/BH li impostano: **l'ultimo vince** (non si moltiplicano).
-- `bwipScale = narrow × mag` = dot per modulo. bwip-js disegna DataMatrix/QR/Aztec a **2 px per modulo** (`BWIP_2PX`, l'immagine viene dimezzata), i lineari e PDF417 a 1 px. `padding: 0` (l'ancoraggio è il simbolo, non la quiet zone).
+- Stato parser: `barcodeType` (da `BARSET` o `BT`/`BARTYPE`), `barcodeNarrow` (default 1), `barcodeMag` (default 2), `barcodeHeight` (default 100).
+  BARSET `[1]/[2]/[3]` e BR/BM/BH li impostano: **l'ultimo vince** (non si moltiplicano).
+- `bwipScale = mag` = dot per modulo (**verificato su stampa** 2026-10-23: `BR 4,2` + `BM 4` → CODE128 a 4 dot/modulo, DataMatrix BM 4 → 4 dot/cella).
+  BR/narrow è solo il rapporto barre larghe:strette, non moltiplica il modulo. bwip-js disegna DataMatrix/QR/Aztec a **2 px per modulo** (`BWIP_2PX`, l'immagine viene dimezzata), i lineari e PDF417 a 1 px. `padding: 0` (l'ancoraggio è il simbolo, non la quiet zone).
 - Altezza lineari: `height` bwip in mm = `barcodeHeight / bwipScale × 25.4 / 72`; mai passarla ai 2D (`BWIP_2D`): bwip-js lancia un errore per valori < 0.01.
 - Cache key `` `${bcid}|${bcText}|${bwipScale}|${barcodeHeight}` ``.
 - `BCID_MAP`: DATAMATRIX, GS1DATAMATRIX, CODE128/A/B/C, CODE39, CODE93, EAN13, EAN8, EAN128/GS1-128, UPCA, UPCE, PDF417, MICROPDF417, AZTEC, QRCODE/QR, I2OF5/INT2OF5. Tipo sconosciuto → `code128`.
@@ -77,7 +94,10 @@ La vecchia tabella "empirica" (box non ruotati, DIR 3/4 scambiati, DataMatrix DI
 - Font non installati (`document.fonts.check`) → testo rosso + sottolineatura tratteggiata, fallback per categoria.
 
 ## Memoria di pagina (variabili, barcode, immagini)
-- `varStore` (index → oggetto variabile) e `imageStore` (filename → `{dataUrl, img}`) tengono valore, etichetta, `maxChars`/`previewValue` e BMP caricati
+- **Loghi variabili**: `PM VARn$` (tipicamente VAR21 Logo1, VAR22 Logo2) → il valore della variabile è il nome del file da caricare.
+  `imageName(el)` risolve il nome; `images` è un `computed` (nomi fissi + valori correnti delle variabili logo), quindi scrivendo un nome
+  in VAR21/22 compare subito un'immagine importabile con quel nome. Variabile vuota → segnaposto `[VAR21]`.
+- `varStore` (index → oggetto variabile) e `imageStore` (`Map` filename → reactive `{dataUrl, img}`, via `storedImage`) tengono valore, etichetta, `maxChars`/`previewValue` e BMP caricati
   anche quando l'elemento sparisce dal layout: rimettendolo torna com'era. `variables`/`images` sono solo le voci presenti nel layout (stessi oggetti dello store).
 - Import JSON scrive in `varStore` anche variabili non presenti nel layout; l'export include quelle del layout più quelle memorizzate con un valore.
 - Solo in memoria: un reload della pagina azzera tutto.
@@ -90,12 +110,12 @@ VAR19 Plant Id · VAR20 Plant Name · VAR21 Logo1 · VAR22 Logo2 · VAR23 Custom
 VAR25 Package Barcode · VAR26–28 Package Custom Field 1–3 · VAR29 Package Description.
 
 ## Parser (inline, nessuna dipendenza)
-Gestiti: LAYOUT INPUT/END/RUN, CLL, NASC, CLIP, DIR, AN, PP/PRPOS, FT, PT, PB, PM, PL/PRLINE, PX/PRBOX, BARSET, BM/BARMAG, BH/BARHEIGHT, BR/BARRATIO, BF.
+Gestiti: LAYOUT INPUT/END/RUN, CLL, NASC, CLIP, DIR, AN, II/NI, PP/PRPOS, FT, PT, PB, PM, PL/PRLINE, PX/PRBOX, BARSET, BT/BARTYPE, BM/BARMAG, BH/BARHEIGHT, BR/BARRATIO, BF/BARFONT.
 Statement separati da `:` (non dentro `"`, `splitOutQ`); contenuto PT/PB/PX separato da `;`; parametri PX dopo lo spessore separati da `,`; `VAR5$` → `{type:'var', index:5}`,
 `"testo"` → `{type:'literal'}`, altro → `{type:'expr'}` (mostrato come `[expr]`). Comandi sconosciuti → `warnings`.
 
 ## Punti aperti
 1. **Offset fisico stampante** (in sospeso): l'anteprima della stampante sposta X di ≈ +21 dot ed è più larga dell'etichetta reale, ma secondo l'utente l'editor senza offset è più fedele alla stampa reale (2026-10-23): per ora nessun offset. In generale 2–4 mm non stampabili a sinistra/in basso (dipende da X-Start e Feed adjust del setup, vedi manuale §3.2 "Origin"). Serve un offset configurabile (Xoff/Yoff in dot).
-2. **Dimensione barcode**: corretta secondo il manuale (modulo = narrow × mag, l'ultimo tra BARSET e BM vince). Da confermare su una stampa reale, soprattutto la dimensione del modulo del DataMatrix.
+2. ~~Dimensione barcode~~: verificata su stampa (modulo = BM, l'ultimo tra BARSET e BM vince).
 3. **Logo BMP**: posizionamento dipende dal punto 1.
 4. Altri scostamenti dal manuale elencati in `docs/fingerprint-reference.md` § "Discrepanze".

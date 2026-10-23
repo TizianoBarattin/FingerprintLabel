@@ -17,6 +17,14 @@
       />
       <div class="ml-auto flex gap-2">
         <DxButton
+          :text="hideEmpty ? 'Mostra variabili vuote' : 'Nascondi variabili vuote'"
+          :icon="hideEmpty ? 'eyeopen' : 'eyeclose'"
+          :styling-mode="hideEmpty ? 'contained' : 'outlined'"
+          :disabled="!parsed"
+          hint="Variabili vuote: niente al loro posto, come in stampa"
+          @click="hideEmpty = !hideEmpty; renderCanvas()"
+        />
+        <DxButton
           text="Esporta Variabili JSON"
           icon="exportxlsx"
           styling-mode="inline"
@@ -60,8 +68,9 @@
           spellcheck="false"
           @input="onSourceInput"
         />
-        <div v-if="parseWarnings.length" class="text-xs text-orange-500 mt-1">
-          <i class="pi pi-exclamation-triangle mr-1"></i>{{ parseWarnings.length }} avvisi parser
+        <div v-if="parseWarnings.length" class="text-xs text-orange-500 mt-1 flex flex-column gap-1">
+          <span><i class="pi pi-exclamation-triangle mr-1"></i>{{ parseWarnings.length }} avvisi parser</span>
+          <span v-for="(w, i) in parseWarnings" :key="i" class="pl-3" style="font-family: monospace; word-break: break-all">{{ w }}</span>
         </div>
         <div v-if="missingFonts.size" class="missing-fonts-box mt-1">
           <div class="flex align-items-center gap-1 mb-1">
@@ -132,7 +141,7 @@
             </div>
             <DxTextBox
               v-model:value="v.value"
-              :placeholder="v.label ? v.label + '...' : 'Valore...'"
+              :placeholder="v.isImageVar ? 'Nome file logo (es. LOGO1.BMP)...' : v.label ? v.label + '...' : 'Valore...'"
               styling-mode="outlined"
               :width="'100%'"
               @value-changed="() => { barcodeCache.clear(); renderCanvas() }"
@@ -204,7 +213,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, nextTick, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, computed, nextTick, onMounted, onUnmounted } from 'vue'
 import DxButton  from 'devextreme-vue/button'
 import DxTextBox from 'devextreme-vue/text-box'
 
@@ -270,30 +279,40 @@ function parseContent(raw) {
 
 function parseLayout(source) {
   const result = { layoutName: null, charset: 'UTF-8', clip: false, elements: [], warnings: [] }
-  const st = { fontName: 'Swiss 721 BT', fontSize: 8, fontSlant: 0, fontWidth: 100,
-               x: 0, y: 0, dir: 1, align: 1, barcodeType: null, barcodeParams: [],
-               barcodeNarrow: 1, barcodeMag: 2, barcodeHeight: 100 }  // default manuale §3.4
+  const st = { fontName: 'Swiss 721 BT', fontSize: 12, fontSlant: 0, fontWidth: 100,   // default manuale e stampa
+               x: 0, y: 0, dir: 1, align: 1, invert: false, barcodeType: null, barcodeParams: [],
+               barcodeNarrow: 1, barcodeMag: 2, barcodeHeight: 100,   // default manuale §3.4
+               barFont: { on: false, name: 'Swiss 721 BT', size: 12, slant: 0, offset: 6 } }
   let m
   for (const raw of source.split('\n')) {
     const line = raw.trim()
     if (!line || line.startsWith('//') || line.startsWith("'")) continue
+    let onInputLine = false
     for (const stmt of splitStmt(line)) {
       const s = stmt.trim(); if (!s) continue
-      if ((m = s.match(/^LAYOUT\s+INPUT\s+"([^"]+)"/i))) { result.layoutName = m[1]; continue }
+      if ((m = s.match(/^LAYOUT\s+INPUT\s+"([^"]+)"/i))) { result.layoutName = m[1]; onInputLine = true; continue }
+      // Dopo LAYOUT INPUT sulla stessa riga la stampante ignora le impostazioni (verificato su stampa con FT).
+      // Avviso solo se l'istruzione cambierebbe qualcosa rispetto ai default.
+      if (onInputLine && !/^LAYOUT\s+(END|RUN)/i.test(s)) {
+        if (!/^(NASC\b|DIR\s*1$|AN\s*1$|CLIP\s+OFF$|BF\s+OFF$)/i.test(s)) result.warnings.push(`Ignorato (riga LAYOUT INPUT): ${s}`)
+        continue
+      }
       if (/^LAYOUT\s+(END|RUN)/i.test(s)) continue
       if (/^CLL$/i.test(s)) continue
       if ((m = s.match(/^NASC\s+"([^"]+)"/i)))    { result.charset = m[1]; continue }
       if ((m = s.match(/^CLIP\s+(ON|OFF)/i)))      { result.clip = m[1].toUpperCase() === 'ON'; continue }
       if ((m = s.match(/^DIR\s*(\d)/i)))           { st.dir = parseInt(m[1]); continue }
       if ((m = s.match(/^AN\s*(\d)/i)))            { st.align = parseInt(m[1]); continue }
+      if (/^(?:II|INVIMAGE)$/i.test(s))            { st.invert = true;  continue }   // testo bianco su nero
+      if (/^(?:NI|NORIMAGE)$/i.test(s))            { st.invert = false; continue }
       if ((m = s.match(/^(?:PP|PRPOS)\s*(\d+)\s*,\s*(\d+)/i))) { st.x = parseInt(m[1]); st.y = parseInt(m[2]); continue }
       if ((m = s.match(/^FT\s*"([^"]+)"(?:\s*,\s*(\d+))?(?:\s*,\s*(\d+))?(?:\s*,\s*(\d+))?/i))) {
-        st.fontName = m[1]; st.fontSize = m[2] ? parseInt(m[2]) : 8
+        st.fontName = m[1]; st.fontSize = m[2] ? parseInt(m[2]) : 12
         // FT "<font>",<size pt>,<slant °>,<width %> (manuale p.25)
         st.fontSlant = m[3] ? parseInt(m[3]) : 0; st.fontWidth = m[4] ? parseInt(m[4]) : 100; continue
       }
       // AN e DIR restano validi fino a PF (manuale p.21): non si resettano dopo ogni oggetto
-      const font = () => ({ fontName: st.fontName, fontSize: st.fontSize, fontSlant: st.fontSlant, fontWidth: st.fontWidth })
+      const font = () => ({ fontName: st.fontName, fontSize: st.fontSize, fontSlant: st.fontSlant, fontWidth: st.fontWidth, invert: st.invert })
       if ((m = s.match(/^PT\s*(.*)/i))) {
         result.elements.push({ type: 'text', x: st.x, y: st.y, dir: st.dir, align: st.align, ...font(),
           content: parseContent(m[1].trim()) }); continue
@@ -302,10 +321,13 @@ function parseLayout(source) {
         result.elements.push({ type: 'barcode', x: st.x, y: st.y, dir: st.dir, align: st.align,
           barcodeType: st.barcodeType, barcodeParams: [...st.barcodeParams],
           barcodeNarrow: st.barcodeNarrow, barcodeMag: st.barcodeMag, barcodeHeight: st.barcodeHeight,
+          barFont: st.barFont.on ? { ...st.barFont } : null,
           content: parseContent(m[1].trim()) }); continue
       }
-      if ((m = s.match(/^PM\s*"([^"]+)"/i))) {
-        result.elements.push({ type: 'image', x: st.x, y: st.y, dir: st.dir, align: st.align, filename: m[1] }); continue
+      // PM "<file>" oppure PM VARn$ (logo variabile: il valore della variabile è il nome del file)
+      if ((m = s.match(/^(?:PM|PRIMAGE)\s*(.+)/i))) {
+        result.elements.push({ type: 'image', x: st.x, y: st.y, dir: st.dir, align: st.align,
+          content: parseContent(m[1].trim()) }); continue
       }
       if ((m = s.match(/^(?:PL|PRLINE)\s*(\d+)\s*,\s*(\d+)/i))) {
         result.elements.push({ type: 'line', x: st.x, y: st.y, dir: st.dir, align: st.align,
@@ -332,10 +354,18 @@ function parseLayout(source) {
         if (Number.isInteger(height)) st.barcodeHeight = height
         continue
       }
+      if ((m = s.match(/^(?:BT|BARTYPE)\s*"([^"]+)"/i))) { st.barcodeType = m[1]; continue }
       if ((m = s.match(/^(?:BM|BARMAG)\s*(\d+)/i)))    { st.barcodeMag = parseInt(m[1]); continue }
       if ((m = s.match(/^(?:BH|BARHEIGHT)\s*(\d+)/i))) { st.barcodeHeight = parseInt(m[1]); continue }
       if ((m = s.match(/^(?:BR|BARRATIO)\s*\d+\s*,\s*(\d+)/i))) { st.barcodeNarrow = parseInt(m[1]); continue }
-      if (/^BF\s+(ON|OFF)/i.test(s)) continue
+      // BF ON|OFF · BF [#n,]"<font>"[,<size>[,<slant>[,<offset>…]]] [ON] – interpretazione sotto il barcode
+      if ((m = s.match(/^(?:BF|BARFONT)\s+(ON|OFF)$/i))) { st.barFont.on = m[1].toUpperCase() === 'ON'; continue }
+      if ((m = s.match(/^(?:BF|BARFONT)\s*(?:#\d+\s*,\s*)?"([^"]+)"(.*?)(\s+ON)?$/i))) {
+        const [size, slant, offset] = m[2].split(',').slice(1).map(p => parseInt(p))
+        Object.assign(st.barFont, { name: m[1], size: size || 12, slant: slant || 0, offset: Number.isInteger(offset) ? offset : 6 })
+        if (m[3]) st.barFont.on = true
+        continue
+      }
       result.warnings.push(s)
     }
   }
@@ -352,11 +382,23 @@ const labelCanvas     = ref(null)
 const layoutSource  = ref('')
 const parsed        = ref(null)
 const parseWarnings = ref([])
+const hideEmpty     = ref(false)   // variabili vuote: niente (come in stampa) invece di [VARn]
 const variables     = ref([])   // { index, label, value } – solo quelle presenti nel layout
-const images        = ref([])   // { filename, dataUrl, img } – solo quelle presenti nel layout
 // Memoria di pagina: valori, impostazioni barcode e immagini restano anche se tolti dal layout
 const varStore      = reactive({})  // index → oggetto variabile
-const imageStore    = reactive({})  // filename → { filename, dataUrl, img }
+const imageStore    = new Map()     // filename → reactive { filename, dataUrl, img }
+
+const storedImage = f => imageStore.get(f) ?? imageStore.set(f, reactive({ filename: f, dataUrl: null, img: null })).get(f)
+// Nome file di un PM: letterale o valore della variabile (null se la variabile è vuota)
+function imageName(el) {
+  const parts = el.content.map(p => p.type === 'literal' ? p.value
+    : p.type === 'var' ? variables.value.find(v => v.index === p.index)?.value?.trim() || null : null)
+  return parts.includes(null) ? null : parts.join('') || null
+}
+// Immagini del layout: nomi fissi + valori correnti delle variabili logo (VAR21/VAR22…)
+const images = computed(() => [...new Set(
+  (parsed.value?.elements ?? []).filter(e => e.type === 'image').map(imageName).filter(Boolean)
+)].map(storedImage))
 
 function storedVar(index, label = '') {
   return varStore[index] ??= { index, label, value: '', fixedLabel: FIXED_VAR_LABELS[index] ?? null,
@@ -435,7 +477,6 @@ function loadLayout(source) {
   parsed.value = parseLayout(source)
   parseWarnings.value = parsed.value.warnings
   buildVariables()
-  buildImages()
   checkFonts().then(renderCanvas)
 }
 
@@ -452,7 +493,6 @@ function onSourceInput() {
       parsed.value = null
       parseWarnings.value = []
       variables.value = []
-      images.value = []
       missingFonts.value = new Set()
     }
   }, 450)
@@ -486,7 +526,8 @@ function buildVariables() {
       if (p.type === 'literal') { lastLit = p.value.replace(/:\s*$/, '').trim() }
       else if (p.type === 'var') {
         // Valore, etichetta e max chars vengono da varStore; tipo barcode ricalcolato a ogni parse
-        if (!map[p.index]) map[p.index] = Object.assign(storedVar(p.index, lastLit), { isBarcodeVar: false, barcodeType: null })
+        if (!map[p.index]) map[p.index] = Object.assign(storedVar(p.index, lastLit), { isBarcodeVar: false, barcodeType: null, isImageVar: false })
+        if (el.type === 'image') map[p.index].isImageVar = true   // logo variabile: valore = nome file
         if (el.type === 'barcode') {
           map[p.index].isBarcodeVar = true
           if (!map[p.index].barcodeType) map[p.index].barcodeType = el.barcodeType
@@ -496,15 +537,6 @@ function buildVariables() {
     }
   }
   variables.value = Object.values(map).sort((a, b) => a.index - b.index)
-}
-
-// ── Immagini ───────────────────────────────────────────────────────────────
-
-function buildImages() {
-  const names = [...new Set(
-    parsed.value.elements.filter(e => e.type === 'image').map(e => e.filename)
-  )]
-  images.value = names.map(f => imageStore[f] ??= { filename: f, dataUrl: null, img: null })
 }
 
 // ── Import variabili JSON ──────────────────────────────────────────────────
@@ -562,8 +594,8 @@ function onImageFile(filename, e) {
   reader.onload = ev => {
     const img = new Image()
     img.onload = () => {
-      const entry = imageStore[filename]
-      if (entry) { entry.dataUrl = ev.target.result; entry.img = img }
+      const entry = storedImage(filename)
+      entry.dataUrl = ev.target.result; entry.img = img
       nextTick(renderCanvas)
     }
     img.src = ev.target.result
@@ -628,6 +660,15 @@ function wrapLines(ctx, text, delim, maxW, kx) {
 
 const PT_TO_MM = 25.4 / 72  // Fingerprint font size è in punti tipografici
 
+// Cella del carattere misurata su stampa (Swiss 721, frazioni dell'em = dimensione FT):
+// sopra la linea di base 1.1 em, sotto 0.2 em
+const CELL_ASC = 1.1, CELL_DESC = 0.2
+// AN sul testo: 1-3 fondo cella · 4-6 linea di base · 7-9 cima cella → Y della linea di base (canvas, Y in giù)
+function textBaselineY(align, em) {
+  const row = Math.floor(((AN[align] ? align : 1) - 1) / 3)
+  return row === 0 ? -CELL_DESC * em : row === 1 ? 0 : CELL_ASC * em
+}
+
 function fontCss(el, scale) {
   const sizePx = el.fontSize * PT_TO_MM * settings.dotsPerMm * scale
   const n = (el.fontName || '').toLowerCase()
@@ -672,8 +713,7 @@ function resolveContent(content, forBarcode = false) {
       if (!v) return `[VAR${p.index}]`
       if (v.value) return v.value
       if (forBarcode && v.previewValue) return v.previewValue
-      if (!forBarcode) return `[VAR${p.index}]`
-      return `[VAR${p.index}]`
+      return hideEmpty.value ? '' : `[VAR${p.index}]`   // come la stampante: variabile vuota = niente
     }
     return `[${p.value}]`
   }).join('')
@@ -750,26 +790,34 @@ function drawEl(ctx, el, scale) {
   ctx.translate(cx(el.x, scale), cy(el.y, scale))
 
   if (el.type === 'text') {
-    const { css } = fontCss(el, scale)
+    const { css, sizePx } = fontCss(el, scale)
     const anInfo   = AN[el.align] || AN[1]
     const isMissing = missingFonts.value.has(el.fontName)
     ctx.font         = css
     ctx.fillStyle    = isMissing ? '#dc2626' : '#000'
     ctx.textAlign    = anInfo.a
-    ctx.textBaseline = anInfo.b
+    ctx.textBaseline = 'alphabetic'
     ctx.rotate(dirRad(el))   // DIR 2/3/4: testo ruotato in senso orario attorno al PP
     if (el.fontWidth && el.fontWidth !== 100) ctx.scale(el.fontWidth / 100, 1)  // larghezza % orizzontale
-    ctx.fillText(resolveContent(el.content), 0, 0)
+    const yBase = textBaselineY(el.align, sizePx)
+    const text  = resolveContent(el.content)
+    if (el.invert && text) {   // II: cella del testo nera, testo bianco
+      const w = ctx.measureText(text).width
+      const x0 = anInfo.a === 'right' ? -w : anInfo.a === 'center' ? -w / 2 : 0
+      ctx.fillStyle = '#000'
+      ctx.fillRect(x0, yBase - CELL_ASC * sizePx, w, (CELL_ASC + CELL_DESC) * sizePx)
+      ctx.fillStyle = '#fff'
+    }
+    ctx.fillText(text, 0, yBase)
     // Sottolineatura tratteggiata rossa per font mancanti
     if (isMissing) {
       const metrics = ctx.measureText(resolveContent(el.content))
       const w = metrics.width
-      const h = parseFloat(css)   // approssimazione altezza
       ctx.save()
       ctx.strokeStyle = '#dc2626'
       ctx.lineWidth   = Math.max(1, scale * 0.6)
       ctx.setLineDash([3 * scale, 2 * scale])
-      const yOff = anInfo.b === 'top' ? h * 0.15 : anInfo.b === 'middle' ? h * 0.6 : 2
+      const yOff = yBase + 2
       const xOff = anInfo.a === 'right' ? -w : anInfo.a === 'center' ? -w / 2 : 0
       ctx.beginPath(); ctx.moveTo(xOff, yOff); ctx.lineTo(xOff + w, yOff); ctx.stroke()
       ctx.setLineDash([])
@@ -780,9 +828,9 @@ function drawEl(ctx, el, scale) {
     ctx.fillStyle = '#000'
     const len   = el.length    * scale
     const thick = Math.max(1, el.thickness * scale)
-    applyAlign(ctx, el, len, thick)
+    applyAlign(ctx, boxAlign(el), len, thick)   // come i box: PP sul lato basso (verificato su stampa)
     ctx.rotate(dirRad(el))   // DIR 1 destra · 2 giù · 3 sinistra · 4 su
-    ctx.fillRect(0, -thick / 2, len, thick)
+    ctx.fillRect(0, -thick, len, thick)
 
   } else if (el.type === 'box' && el.content) {
     drawTextBox(ctx, el, scale)
@@ -801,8 +849,9 @@ function drawEl(ctx, el, scale) {
   } else if (el.type === 'barcode') {
     const bcText = resolveContent(el.content, true)
     const bcid   = getBcid(el.barcodeType)
-    // Barra stretta / modulo 2D in dot = narrow × mag (manuale §3.4) → bwipScale = dot per modulo
-    const bwipScale = Math.max(1, Math.round((el.barcodeNarrow || 1) * (el.barcodeMag || 1)))
+    // Modulo (barra stretta / cella 2D) in dot = BM. BR/narrow è solo il rapporto larghe:strette
+    // (verificato su stampa: BR 4,2 + BM 4 → CODE128 a 4 dot per modulo) → bwipScale = dot per modulo
+    const bwipScale = Math.max(1, Math.round(el.barcodeMag || 1))
     const cacheKey = `${bcid}|${bcText}|${bwipScale}|${el.barcodeHeight}`
     let offCanvas = barcodeCache.get(cacheKey)
     if (!offCanvas && bwipjsLib && bcText && !bcText.startsWith('[')) {
@@ -820,13 +869,23 @@ function drawEl(ctx, el, scale) {
       const bh = offCanvas.height / k * scale
       const bw = offCanvas.width  / k * scale
       ctx.imageSmoothingEnabled = false
-      applyAlign(ctx, el, bw, bh)
+      // BF ON (solo lineari): testo sotto le barre, allineato a sx; il campo = barre + offset + cella testo
+      // e AN vale per tutto il campo (verificato su stampa)
+      const bf  = el.barFont && !BWIP_2D.has(bcid) ? el.barFont : null
+      const bfEm = bf ? bf.size * PT_TO_MM * settings.dotsPerMm * scale : 0
+      const fieldH = bf ? bh + bf.offset * scale + (CELL_ASC + CELL_DESC) * bfEm : bh
+      applyAlign(ctx, el, bw, fieldH)
       // Lato-L (angolo in basso a sx in DIR 1) sul PP, poi rotazione oraria DIR (verificato su stampa):
       // DIR 1 destra-su · 2 destra-giù · 3 sinistra-giù · 4 sinistra-su
       ctx.rotate(dirRad(el))
-      ctx.drawImage(offCanvas, 0, -bh, bw, bh)
-    } else {
-      // Fallback placeholder
+      ctx.drawImage(offCanvas, 0, -fieldH, bw, bh)
+      if (bf) {
+        ctx.font = fontCss({ fontName: bf.name, fontSize: bf.size, fontSlant: bf.slant }, scale).css
+        ctx.fillStyle = '#000'; ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic'
+        ctx.fillText(bcText, 0, -CELL_DESC * bfEm)
+      }
+    } else if (!(hideEmpty.value && !bcText)) {
+      // Fallback placeholder (nascosto se il dato è vuoto e "Nascondi variabili vuote" è attivo)
       const mag = el.barcodeMag || 1
       const sz  = Math.max(30, 50 * mag * 0.15) * scale
       applyAlign(ctx, { ...el, dir: 1 }, sz, sz)   // il segnaposto non ruota
@@ -848,7 +907,8 @@ function drawEl(ctx, el, scale) {
     }
 
   } else if (el.type === 'image') {
-    const entry = images.value.find(i => i.filename === el.filename)
+    const name  = imageName(el)
+    const entry = name && imageStore.get(name)
     if (entry?.img) {
       // 1 pixel del BMP = 1 dot stampante; convertiamo in canvas pixels
       const imgW = entry.img.naturalWidth  * scale
@@ -860,7 +920,7 @@ function drawEl(ctx, el, scale) {
       else if (d === 2) ctx.drawImage(entry.img,     0,    0, imgW, imgH)
       else if (d === 4) ctx.drawImage(entry.img, -imgW, -imgH, imgW, imgH)
       else              ctx.drawImage(entry.img,     0, -imgH, imgW, imgH)
-    } else {
+    } else if (!(hideEmpty.value && !name)) {   // logo variabile vuoto: niente
       const w = 80 * scale, h = 28 * scale
       applyAlign(ctx, { ...el, dir: 1 }, w, h)   // il segnaposto non ruota
       ctx.fillStyle   = '#f9f9f9'
@@ -874,7 +934,7 @@ function drawEl(ctx, el, scale) {
       ctx.font         = `${Math.max(7, 7 * scale)}px Arial`
       ctx.textAlign    = 'left'
       ctx.textBaseline = 'middle'
-      ctx.fillText(el.filename.replace(/\.[^.]+$/, ''), 3, -h / 2)
+      ctx.fillText(name ? name.replace(/\.[^.]+$/, '') : resolveContent(el.content), 3, -h / 2)   // es. [VAR21]
     }
   }
 
