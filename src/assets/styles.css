@@ -13,10 +13,12 @@ html, body { margin: 0; height: 100%; background: #fff; }
 }
 
 .source-editor {
+  /* alta 20 righe (massimo del PLC): avvisi e font mancanti restano visibili subito sotto */
   flex: 1;
-  width: 100%;
-  min-height: 0;
+  min-width: 0;
+  height: calc(20 * 1.55 * 11.5px + 18px);
   resize: none;
+  white-space: pre;   /* niente a capo: ogni riga visiva = una riga del layout, allineata al numero */
   font-family: 'Cascadia Code', 'Fira Mono', Consolas, monospace;
   font-size: 11.5px;
   line-height: 1.55;
@@ -28,6 +30,26 @@ html, body { margin: 0; height: 100%; background: #fff; }
   outline: none;
   overflow-y: auto;
 }
+/* Numeri di riga a fianco della sorgente (scorrono insieme alla textarea) */
+.source-gutter {
+  flex: 0 0 auto;
+  min-width: 2.5em;
+  height: calc(20 * 1.55 * 11.5px + 36px);   /* = textarea: contenuto + padding 16 + bordo 2 (content-box) */
+  overflow: hidden;
+  font-family: 'Cascadia Code', 'Fira Mono', Consolas, monospace;
+  font-size: 11.5px;
+  line-height: 1.55;
+  padding: 8px 6px 30px;   /* margine sotto: segue la textarea anche con la barra di scorrimento orizzontale */
+  box-sizing: border-box;
+  text-align: right;
+  color: #9ca3af;
+  background: #f3f4f6;
+  border: 1px solid #d1d5db;
+  border-right: none;
+  border-radius: 4px 0 0 4px;
+  user-select: none;
+}
+.source-gutter + .source-editor { border-radius: 0 4px 4px 0; }
 .source-editor:focus {
   border-color: #6b7280;
   background: #fff;

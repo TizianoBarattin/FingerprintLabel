@@ -48,15 +48,21 @@ Riassunto dal manuale (`docs/intermec-direct-protocol-v8.txt`, pagine citate com
 - `NASC "<charset>"` – set caratteri (es. "UTF-8").
 
 ## Discrepanze tra codice attuale e manuale
-1. ~~FT 4° parametro usato come angolo~~ — **risolto**: è `fontWidth` (larghezza %, default 100), resa con `ctx.scale(w/100, 1)`. Resta: default size manuale 12, parser 8.
+1. ~~FT 4° parametro usato come angolo~~ — **risolto**: è `fontWidth` (larghezza %, default 100), resa con `ctx.scale(w/100, 1)`. Default size 12 pt come manuale e stampa.
 2. ~~BARSET `[2]` trattato come larghezza barra~~ — **risolto**: modulo = mag (verificato su stampa: BR/narrow è solo un rapporto), BARSET/BM/BR/BH si sovrascrivono (l'ultimo vince), altezza passata a bwip-js per i lineari.
 3. ~~AN solo sul testo~~ — **risolto**: `applyAlign` applica AN a barcode, immagini, box e linee (offset nel riferimento DIR 1, ruotato con DIR). AN non si resetta più dopo ogni oggetto (vale fino a PF).
 4. ~~DIR sul testo ignorato~~ — **risolto**: testo ruotato in senso orario di 90° per step attorno al PP.
-5. Comandi non gestiti dal parser (finiscono in `warnings`): MAG, XORMODE, PF, FORMFEED, `BARSET #n`, dati `CNTn$`/`DATE$`/`TIME$` (mostrati come `[expr]`).
-6. `BCID_MAP` manca di vari tipi del manuale (CODE39A/C, INT2OF5C, UCC128, CODABAR, MAXICODE, …); il default del protocollo è INT2OF5, il fallback del codice è code128.
+5. Comandi non gestiti dal parser (finiscono in `warnings`): PF, FORMFEED. MAG gestito e verificato su stampa (`test-mag.lbl`, 2026-10-27); XORMODE gestito e verificato (`test-xor.lbl`; II ignora XOR). Larghezza Swiss 721 corretta (`FONT_KX` 0.95). Dati calcolati (`DATE$`, `TIME$`, `CNTn$` …) valutati da `evalExpr`, verificati su stampa (`test-data-ora.lbl`, 2026-10-27).
+6. ~~`BCID_MAP` incompleto~~ — **risolto per i lineari** (verificato su stampa, dettagli nel CLAUDE.md § Barcode). Senza tipo = INT2OF5.
+   2D verificati su stampa (`test-tipi-2d.lbl`): BARSET #n, DataMatrix ASCII, PDF417 a 1 colonna, CODE16K/CODE49; QTCODE non stampa.
+   Poi verificati (`test-dm-parametri.lbl`): 7° parametro = formato DataMatrix, parametri BARSET ereditati tra un BARSET e l'altro.
+   Poi verificati (`test-aperti.lbl`, 2026-10-27): CODE11, PLESSEY, SCCADDON, ADDON2 esatti; BF su EAN/UPC, PDF417, DataMatrix, PLESSEY;
+   DataMatrix in C40/Text; altezza PDF417 senza righe. MAXICODE e UPCD1–5 non stampati.
+   Riga interrotta dopo un barcode in errore: simulata (`barcodeFails`). UPCE: solo 6 cifre (`test-upce.lbl`).
+   Cursore e guardie di EAN/UPC/ADDON con BF ON/OFF verificati (`test-cursore-ean.lbl`).
 7. ~~`PM VARn$` non riconosciuto~~ — **risolto**: PM accetta letterale o variabile; il valore della variabile è il nome del file (loghi VAR21/VAR22).
 8. **PX multi-riga** gestito (`drawTextBox`): a capo su CR/LF o delimitatore, poi a parola sulla larghezza; max 20 righe; interlinea = vOff. Non gestiti: stringa di sillabazione, sillabazione oltre spazi/trattini.
 9. ~~DIR su box e barcode DIR 4 diversi dal manuale~~ — **risolto e verificato su stampa** (2026-10-21): tutti gli oggetti ruotano in senso orario attorno al PP, come da manuale.
 11. **AN su testo/linee/barcode/immagini e BF ON** verificati su stampa (2026-10-23), dettagli nel CLAUDE.md § Semantica DIR. Default FT 12 pt applicato.
-    Aperti: il cursore che avanza dopo ogni oggetto non è simulato; un FT sulla riga di `LAYOUT INPUT` viene ignorato dalla stampante ma non dall'editor.
+    Poi risolti (2026-10-23): cursore che avanza dopo PT/PB/PM simulato, FT sulla riga di `LAYOUT INPUT` ignorato come in stampa, immagini ruotate con DIR.
 10. **AN sui box (PX)**, verificato su stampa (2026-10-23): il PP sta sempre sul lato basso del box, AN sceglie solo sx/centro/dx; la riga di AN allinea solo il testo dentro. Implementato con `boxAlign`.

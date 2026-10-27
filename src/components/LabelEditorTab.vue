@@ -42,6 +42,7 @@
         <select v-model.number="settings.dotsPerMm" class="dim-select" @change="applySettings">
           <option :value="8">203 DPI</option>
           <option :value="11.81">300 DPI</option>
+          <option :value="11.87">300 DPI (11.87 app)</option>
           <option :value="16">406 DPI</option>
         </select>
         <button class="fit-btn" :disabled="!parsed" title="Adatta altezza al contenuto" @click="fitHeight">
@@ -57,17 +58,24 @@
     <div class="flex flex-row flex-1 gap-2" style="min-height: 0; overflow: hidden">
 
       <!-- ── COLONNA SINISTRA: sorgente Fingerprint ── -->
-      <div class="flex flex-column gap-1" style="width: 800px; min-width: 500px">
+      <div class="flex flex-column gap-1" style="width: 800px; min-width: 500px; overflow-y: auto">
         <div class="section-label">
           <i class="pi pi-code mr-1"></i>Sorgente
         </div>
-        <textarea
-          v-model="layoutSource"
-          class="source-editor"
-          placeholder="Incolla o importa un layout Fingerprint..."
-          spellcheck="false"
-          @input="onSourceInput"
-        />
+        <div class="flex" style="flex: 0 0 auto">
+          <div ref="gutter" class="source-gutter">
+            <div v-for="n in sourceLines" :key="n">{{ n }}</div>
+          </div>
+          <textarea
+            v-model="layoutSource"
+            class="source-editor"
+            placeholder="Incolla o importa un layout Fingerprint..."
+            spellcheck="false"
+            wrap="off"
+            @input="onSourceInput"
+            @scroll="e => gutter.scrollTop = e.target.scrollTop"
+          />
+        </div>
         <div v-if="parseWarnings.length" class="text-xs text-orange-500 mt-1 flex flex-column gap-1">
           <span><i class="pi pi-exclamation-triangle mr-1"></i>{{ parseWarnings.length }} avvisi parser</span>
           <span v-for="(w, i) in parseWarnings" :key="i" class="pl-3" style="font-family: monospace; word-break: break-all">{{ w }}</span>
@@ -78,7 +86,7 @@
             <span style="color:#dc2626;font-weight:700;font-size:11px">Font non installati</span>
           </div>
           <div v-for="f in [...missingFonts]" :key="f" class="missing-font-row">
-            {{ f }}
+            {{ f }}<span v-if="fontKx(f) !== 1" style="color:#6b7280"> → Arial (larghezza calibrata)</span>
           </div>
         </div>
       </div>
@@ -115,7 +123,9 @@
           <div class="section-label" style="color:#b91c1c">
             <i class="pi pi-exclamation-circle mr-1"></i>Font non installati
           </div>
-          <div v-for="fn in [...missingFonts]" :key="fn" class="text-xs text-red-600">{{ fn }}</div>
+          <div v-for="fn in [...missingFonts]" :key="fn" class="text-xs" :style="{ color: fontKx(fn) !== 1 ? '#6b7280' : '#dc2626' }">
+            {{ fn }}<span v-if="fontKx(fn) !== 1"> → Arial (larghezza calibrata)</span>
+          </div>
         </div>
 
         <!-- Variabili -->
@@ -268,23 +278,120 @@ const splitStmt = line => splitOutQ(line, ':')
 const splitSemi = str  => splitOutQ(str, ';')
 const unquote   = s    => s?.startsWith('"') && s.endsWith('"') ? s.slice(1, -1) : null
 
-function parseContent(raw) {
+// `clock` = impostazioni di data/ora/contatori del layout (FORMAT DATE$ ecc.), usate per valutare le espressioni
+function parseContent(raw, clock = null) {
   return splitSemi(raw).filter(s => s !== '').map(s => {
     const vm = s.match(/^VAR(\d+)\$$/i)
     if (vm) return { type: 'var', index: parseInt(vm[1]) }
     if (s.startsWith('"') && s.endsWith('"')) return { type: 'literal', value: s.slice(1, -1) }
-    return { type: 'expr', value: s }
+    return { type: 'expr', value: s, clock }
   })
 }
 
-function parseLayout(source) {
-  const result = { layoutName: null, charset: 'UTF-8', clip: false, elements: [], warnings: [] }
-  const st = { fontName: 'Swiss 721 BT', fontSize: 12, fontSlant: 0, fontWidth: 100,   // default manuale e stampa
-               x: 0, y: 0, dir: 1, align: 1, invert: false, barcodeType: null, barcodeParams: [],
-               barcodeNarrow: 1, barcodeMag: 2, barcodeHeight: 100,   // default manuale §3.4
-               barFont: { on: false, name: 'Swiss 721 BT', size: 12, slant: 0, offset: 6 } }
+// ── Orologio e contatori (manuale §3.9 p.41–43, §5.4 p.56–57, §5.6 p.58) ──
+// Data/ora = orologio del PC al momento del disegno, oppure quelle fissate nel sorgente con DATE$ = "YYMMDD" / TIME$ = "HHMMSS".
+const newClock = () => ({ dateFmt: 'YYMMDD', timeFmt: 'HHMMSS', months: {}, weekdays: {}, counters: {}, date: null, time: null })
+const WEEKDAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+const rj = (v, n) => String(v).padStart(n, '0').slice(-n)   // cifre allineate a destra, una per lettera
+const ymd = s => new Date(2000 + +s.slice(0, 2), +s.slice(2, 4) - 1, +s.slice(4, 6))
+function clockNow(clock) {
+  const d = clock.date ? ymd(clock.date) : new Date()
+  const t = clock.time ?? null
+  if (t) d.setHours(+t.slice(0, 2), +t.slice(2, 4), +t.slice(4, 6))
+  else if (clock.date) { const n = new Date(); d.setHours(n.getHours(), n.getMinutes(), n.getSeconds()) }
+  return d
+}
+// Formato per gruppi di lettere uguali: "YYYY.MM.DD", "hh:MM PP" …; altri caratteri copiati.
+// NAME DATE$: nome del mese al posto del numero, tagliato a sinistra alla lunghezza del gruppo
+// (verificato su stampa, test-data-ora.lbl, 2026-10-27: "DICEMBRE" con MM → "RE")
+function fmtDate(d, f, months = {}) {
+  return f.replace(/Y+|M+|D+/g, g => {
+    const n = g.length
+    if (g[0] === 'Y') return rj(d.getFullYear(), n)
+    if (g[0] === 'D') return rj(d.getDate(), n)
+    const name = months[d.getMonth() + 1]
+    return name ? name.slice(-n) : rj(d.getMonth() + 1, n)
+  })
+}
+function fmtTime(d, f) {
+  const h = d.getHours(), ap = h < 12 ? 'AM' : 'PM'
+  return f.replace(/H+|h+|M+|S+|P+|p+/g, g => {
+    const n = g.length
+    switch (g[0]) {
+      case 'H': return rj(h, n)
+      case 'h': return rj(h % 12 || 12, n)
+      case 'M': return rj(d.getMinutes(), n)
+      case 'S': return rj(d.getSeconds(), n)
+      case 'P': return ap.slice(0, n)
+      default:  return ap.toLowerCase().slice(0, n)
+    }
+  })
+}
+function isoWeek(d) {
+  const t = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()))
+  t.setUTCDate(t.getUTCDate() + 4 - (t.getUTCDay() || 7))
+  return Math.ceil(((t - Date.UTC(t.getUTCFullYear(), 0, 1)) / 864e5 + 1) / 7)
+}
+// Valuta DATE$, TIME$, WEEKDAY$, WEEKNUMBER, DATEADD$, TIMEADD$, CNTn$; null = espressione non riconosciuta
+function evalExpr(expr, clock) {
+  if (!clock) return null
+  const s = expr.replace(/\s+(?=(?:[^"]*"[^"]*")*[^"]*$)/g, '')   // spazi fuori dalle virgolette
+  const now = clockNow(clock)
+  const date = a => /^DATE\$$/i.test(a) ? now : /^"\d{6}"$/.test(a) ? ymd(a.slice(1, -1)) : null
   let m
-  for (const raw of source.split('\n')) {
+  if ((m = s.match(/^DATE\$(\("F"\))?$/i))) return m[1] ? fmtDate(now, clock.dateFmt, clock.months) : fmtDate(now, 'YYMMDD')
+  if ((m = s.match(/^TIME\$(\("F"\))?$/i))) return fmtTime(now, m[1] ? clock.timeFmt : 'HHMMSS')
+  if ((m = s.match(/^WEEKDAY\$\((.+)\)$/i)) && date(m[1])) {
+    const wd = (date(m[1]).getDay() + 6) % 7 + 1     // 1 = lunedì … 7 = domenica
+    return clock.weekdays[wd] ?? WEEKDAYS[wd - 1]
+  }
+  if ((m = s.match(/^WEEKNUMBER\(([^,]+)(?:,\d+)?\)$/i)) && date(m[1])) return String(isoWeek(date(m[1])))
+  if ((m = s.match(/^DATEADD\$\((?:"(\d{6})",)?(-?\d+)(,"F")?\)$/i))) {
+    const d = m[1] ? ymd(m[1]) : new Date(now)
+    d.setDate(d.getDate() + +m[2])
+    return m[3] ? fmtDate(d, clock.dateFmt, clock.months) : fmtDate(d, 'YYMMDD')
+  }
+  if ((m = s.match(/^TIMEADD\$\((?:"(\d{6})",)?(-?\d+)(,"F")?\)$/i))) {
+    const d = new Date(now)
+    if (m[1]) d.setHours(+m[1].slice(0, 2), +m[1].slice(2, 4), +m[1].slice(4, 6))
+    d.setSeconds(d.getSeconds() + +m[2])
+    return fmtTime(d, m[3] ? clock.timeFmt : 'HHMMSS')
+  }
+  // Contatore: valore iniziale (COUNT& "START") con zeri fino a COUNT& "WIDTH"; non definito = 1
+  if ((m = s.match(/^CNT(\d+)\$$/i))) {
+    const c = clock.counters[m[1]] ?? {}
+    const v = c.start ?? '1'
+    return /^-?\d+$/.test(v) ? (v[0] === '-' ? '-' : '') + v.replace('-', '').padStart(+(c.width || 1), '0') : v
+  }
+  return null
+}
+
+// `fails(el)` (opzionale) dice se un barcode va in errore in stampa: la stampante interrompe la riga e non esegue
+// le istruzioni dopo, nemmeno i cambi di stato (verificato su stampa, test-aperti.lbl, 2026-10-27)
+function parseLayout(source, fails = null) {
+  const result = { layoutName: null, charset: 'UTF-8', clip: false, elements: [], warnings: [], clock: newClock() }
+  const st = { fontName: 'Swiss 721 BT', fontSize: 12, fontSlant: 0, fontWidth: 100,   // default manuale e stampa
+               x: 0, y: 0, ppFresh: true, dir: 1, align: 1, invert: false, barcodeType: null, barcodeParams: [],
+               barcodeWide: 3, barcodeNarrow: 1, barcodeMag: 2, barcodeHeight: 100,   // default manuale §3.4
+               barFont: { on: false, name: 'Swiss 721 BT', size: 12, slant: 0, offset: 6, magH: 1, magW: 1 },
+               magH: 1, magW: 1, xor: false }
+  let m
+  const checkType = t => { if (!BCID_MAP[t.toUpperCase()]) result.warnings.push(`Tipo barcode non gestito (segnaposto): ${t}`) }
+  // Parametri BARSET dalla posizione `pos` (2 = wide) → barcodeParams[pos-2]:
+  // [0] wide, [1] narrow, [2] mag, [3] height, [4] security, [5] aspect h, [6] aspect w, [7] righe, [8] colonne, [9] truncate.
+  // narrow/mag/height aggiornano lo stato: l'ultimo tra BARSET e BM/BR/BH vince.
+  // I parametri non scritti restano quelli del BARSET precedente, anche cambiando tipo (verificato su stampa)
+  function setBarParams(values, pos) {
+    values.forEach((p, i) => { p = p.trim(); st.barcodeParams[pos - 2 + i] = isNaN(p) ? p : parseInt(p) })
+    const [wide, narrow, mag, height] = st.barcodeParams
+    const set = i => i >= pos - 2 && i < pos - 2 + values.length
+    if (set(0) && Number.isInteger(wide))   st.barcodeWide   = wide
+    if (set(1) && Number.isInteger(narrow)) st.barcodeNarrow = narrow
+    if (set(2) && Number.isInteger(mag))    st.barcodeMag    = mag
+    if (set(3) && Number.isInteger(height)) st.barcodeHeight = height
+  }
+  for (const [i, raw] of source.split('\n').entries()) {
+    const lineNo = i + 1
     const line = raw.trim()
     if (!line || line.startsWith('//') || line.startsWith("'")) continue
     let onInputLine = false
@@ -301,11 +408,30 @@ function parseLayout(source) {
       if (/^CLL$/i.test(s)) continue
       if ((m = s.match(/^NASC\s+"([^"]+)"/i)))    { result.charset = m[1]; continue }
       if ((m = s.match(/^CLIP\s+(ON|OFF)/i)))      { result.clip = m[1].toUpperCase() === 'ON'; continue }
+      // Orologio e contatori: impostazioni globali della stampante (di solito inviate prima del layout)
+      const ck = result.clock
+      if ((m = s.match(/^FORMAT\s+DATE\$\s*"([^"]*)"/i)))  { ck.dateFmt = m[1] || 'YYMMDD'; continue }
+      if ((m = s.match(/^FORMAT\s+TIME\$\s*"([^"]*)"/i)))  { ck.timeFmt = m[1] || 'HHMMSS'; continue }
+      if ((m = s.match(/^NAME\s+DATE\$\s*(\d+)\s*,\s*"([^"]*)"/i)))    { ck.months[+m[1]]   = m[2]; continue }
+      if ((m = s.match(/^NAME\s+WEEKDAY\$\s*(\d+)\s*,\s*"([^"]*)"/i))) { ck.weekdays[+m[1]] = m[2]; continue }
+      if ((m = s.match(/^DATE\$\s*=\s*"(\d{6})"/i)))       { ck.date = m[1]; continue }
+      if ((m = s.match(/^TIME\$\s*=\s*"(\d{6})"/i)))       { ck.time = m[1]; continue }
+      if ((m = s.match(/^COUNT&\s*"(\w+)"\s*,\s*(\d+)\s*,\s*"([^"]*)"/i))) {
+        (ck.counters[m[2]] ??= {})[m[1].toLowerCase()] = m[3]; continue
+      }
       if ((m = s.match(/^DIR\s*(\d)/i)))           { st.dir = parseInt(m[1]); continue }
       if ((m = s.match(/^AN\s*(\d)/i)))            { st.align = parseInt(m[1]); continue }
       if (/^(?:II|INVIMAGE)$/i.test(s))            { st.invert = true;  continue }   // testo bianco su nero
       if (/^(?:NI|NORIMAGE)$/i.test(s))            { st.invert = false; continue }
-      if ((m = s.match(/^(?:PP|PRPOS)\s*(\d+)\s*,\s*(\d+)/i))) { st.x = parseInt(m[1]); st.y = parseInt(m[2]); continue }
+      // MAG <h>,<w> (1–4): ingrandisce testi e immagini (manuale p.26, 32). Fuori range = errore 1021 → riga interrotta
+      if ((m = s.match(/^MAG\s*(\d+)\s*,\s*(\d+)/i))) {
+        const [h, w] = [+m[1], +m[2]]
+        if (h < 1 || h > 4 || w < 1 || w > 4) { result.warnings.push(`Riga ${lineNo}: MAG fuori range (1–4), resto della riga ignorato`); break }
+        st.magH = h; st.magW = w; continue
+      }
+      // XORMODE ON: le intersezioni tra campi escono bianche (manuale p.24)
+      if ((m = s.match(/^XORMODE\s+(ON|OFF)$/i)))  { st.xor = m[1].toUpperCase() === 'ON'; continue }
+      if ((m = s.match(/^(?:PP|PRPOS)\s*(\d+)\s*,\s*(\d+)/i))) { st.x = parseInt(m[1]); st.y = parseInt(m[2]); st.ppFresh = true; continue }
       if ((m = s.match(/^FT\s*"([^"]+)"(?:\s*,\s*(\d+))?(?:\s*,\s*(\d+))?(?:\s*,\s*(\d+))?/i))) {
         st.fontName = m[1]; st.fontSize = m[2] ? parseInt(m[2]) : 12
         // FT "<font>",<size pt>,<slant °>,<width %> (manuale p.25)
@@ -313,56 +439,65 @@ function parseLayout(source) {
       }
       // AN e DIR restano validi fino a PF (manuale p.21): non si resettano dopo ogni oggetto
       const font = () => ({ fontName: st.fontName, fontSize: st.fontSize, fontSlant: st.fontSlant, fontWidth: st.fontWidth, invert: st.invert })
+      // follow: nessun PP dopo l'ultimo PT/PB/PM → l'oggetto parte dal cursore lasciato da quello (calcolato al disegno)
+      const at = () => ({ x: st.x, y: st.y, follow: !st.ppFresh, dir: st.dir, align: st.align, xor: st.xor, magH: st.magH, magW: st.magW })
       if ((m = s.match(/^PT\s*(.*)/i))) {
-        result.elements.push({ type: 'text', x: st.x, y: st.y, dir: st.dir, align: st.align, ...font(),
-          content: parseContent(m[1].trim()) }); continue
+        result.elements.push({ type: 'text', ...at(), ...font(),
+          content: parseContent(m[1].trim(), result.clock) }); st.ppFresh = false; continue
       }
       if ((m = s.match(/^PB\s*(.*)/i))) {
-        result.elements.push({ type: 'barcode', x: st.x, y: st.y, dir: st.dir, align: st.align,
+        result.elements.push({ type: 'barcode', ...at(),
           barcodeType: st.barcodeType, barcodeParams: [...st.barcodeParams],
-          barcodeNarrow: st.barcodeNarrow, barcodeMag: st.barcodeMag, barcodeHeight: st.barcodeHeight,
+          barcodeWide: st.barcodeWide, barcodeNarrow: st.barcodeNarrow, barcodeMag: st.barcodeMag, barcodeHeight: st.barcodeHeight,
           barFont: st.barFont.on ? { ...st.barFont } : null,
-          content: parseContent(m[1].trim()) }); continue
+          content: parseContent(m[1].trim(), result.clock) }); st.ppFresh = false
+        if (fails?.(result.elements.at(-1))) {
+          result.warnings.push(`Riga ${lineNo}: barcode non stampabile, resto della riga ignorato come in stampa`)
+          break
+        }
+        continue
       }
       // PM "<file>" oppure PM VARn$ (logo variabile: il valore della variabile è il nome del file)
       if ((m = s.match(/^(?:PM|PRIMAGE)\s*(.+)/i))) {
-        result.elements.push({ type: 'image', x: st.x, y: st.y, dir: st.dir, align: st.align,
-          content: parseContent(m[1].trim()) }); continue
+        result.elements.push({ type: 'image', ...at(),
+          content: parseContent(m[1].trim(), result.clock) }); st.ppFresh = false; continue
       }
       if ((m = s.match(/^(?:PL|PRLINE)\s*(\d+)\s*,\s*(\d+)/i))) {
-        result.elements.push({ type: 'line', x: st.x, y: st.y, dir: st.dir, align: st.align,
+        result.elements.push({ type: 'line', ...at(),
           length: parseInt(m[1]), thickness: parseInt(m[2]) }); continue
       }
       // PX <h>,<w>,<spessore>[,<dato>[,<off h>[,<off v>[,"<delimitatore>"[,"<sillabazione>"]]]]]
       if ((m = s.match(/^(?:PX|PRBOX)\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)(?:\s*,\s*(.+))?/i))) {
-        const box = { type: 'box', x: st.x, y: st.y, dir: st.dir, align: st.align,
+        const box = { type: 'box', ...at(),
           height: parseInt(m[1]), width: parseInt(m[2]), thickness: parseInt(m[3]) }
         if (m[4]) {
           const [data, hOff, vOff, delim] = splitOutQ(m[4], ',')
-          Object.assign(box, font(), { content: parseContent(data),
+          Object.assign(box, font(), { content: parseContent(data, result.clock),
             hOff: parseInt(hOff) || 0, vOff: parseInt(vOff) || 0, delim: unquote(delim) })
         }
         result.elements.push(box); continue
       }
       if ((m = s.match(/^BARSET\s*"([^"]+)"(?:\s*,\s*(.+))?/i))) {
-        st.barcodeType = m[1]
-        st.barcodeParams = m[2] ? m[2].split(',').map(p => { p = p.trim(); return isNaN(p) ? p : parseInt(p) }) : []
-        // [0] wide, [1] narrow, [2] mag, [3] height: l'ultimo tra BARSET e BM/BR/BH vince
-        const [, narrow, mag, height] = st.barcodeParams
-        if (Number.isInteger(narrow)) st.barcodeNarrow = narrow
-        if (Number.isInteger(mag))    st.barcodeMag    = mag
-        if (Number.isInteger(height)) st.barcodeHeight = height
-        continue
+        st.barcodeType = m[1]; checkType(m[1])
+        setBarParams(m[2] ? m[2].split(',') : [], 2); continue
       }
-      if ((m = s.match(/^(?:BT|BARTYPE)\s*"([^"]+)"/i))) { st.barcodeType = m[1]; continue }
+      // BARSET #n,… : i valori partono dal parametro n (1 = nome) e sovrascrivono solo quelli (verificato su stampa)
+      if ((m = s.match(/^BARSET\s*#(\d+)\s*,\s*(.+)/i))) {
+        const n = parseInt(m[1]), parts = splitOutQ(m[2], ',')
+        if (n === 1) { st.barcodeType = unquote(parts[0]) ?? parts[0]; checkType(st.barcodeType); parts.shift() }
+        setBarParams(parts, Math.max(n, 2)); continue
+      }
+      if ((m = s.match(/^(?:BT|BARTYPE)\s*"([^"]+)"/i))) { st.barcodeType = m[1]; checkType(m[1]); continue }
       if ((m = s.match(/^(?:BM|BARMAG)\s*(\d+)/i)))    { st.barcodeMag = parseInt(m[1]); continue }
       if ((m = s.match(/^(?:BH|BARHEIGHT)\s*(\d+)/i))) { st.barcodeHeight = parseInt(m[1]); continue }
-      if ((m = s.match(/^(?:BR|BARRATIO)\s*\d+\s*,\s*(\d+)/i))) { st.barcodeNarrow = parseInt(m[1]); continue }
+      if ((m = s.match(/^(?:BR|BARRATIO)\s*(\d+)\s*,\s*(\d+)/i))) { st.barcodeWide = parseInt(m[1]); st.barcodeNarrow = parseInt(m[2]); continue }
       // BF ON|OFF · BF [#n,]"<font>"[,<size>[,<slant>[,<offset>…]]] [ON] – interpretazione sotto il barcode
       if ((m = s.match(/^(?:BF|BARFONT)\s+(ON|OFF)$/i))) { st.barFont.on = m[1].toUpperCase() === 'ON'; continue }
       if ((m = s.match(/^(?:BF|BARFONT)\s*(?:#\d+\s*,\s*)?"([^"]+)"(.*?)(\s+ON)?$/i))) {
-        const [size, slant, offset] = m[2].split(',').slice(1).map(p => parseInt(p))
-        Object.assign(st.barFont, { name: m[1], size: size || 12, slant: slant || 0, offset: Number.isInteger(offset) ? offset : 6 })
+        // BF "<font>",<size>,<slant>,<offset>,<mag h>,<mag w>
+        const [size, slant, offset, magH, magW] = m[2].split(',').slice(1).map(p => parseInt(p))
+        Object.assign(st.barFont, { name: m[1], size: size || 12, slant: slant || 0, offset: Number.isInteger(offset) ? offset : 6,
+          magH: magH >= 1 && magH <= 4 ? magH : 1, magW: magW >= 1 && magW <= 4 ? magW : 1 })
         if (m[3]) st.barFont.on = true
         continue
       }
@@ -380,6 +515,8 @@ const canvasContainer = ref(null)
 const labelCanvas     = ref(null)
 
 const layoutSource  = ref('')
+const sourceLines   = computed(() => layoutSource.value.split('\n').length)   // numeri di riga della sorgente
+const gutter        = ref(null)
 const parsed        = ref(null)
 const parseWarnings = ref([])
 const hideEmpty     = ref(false)   // variabili vuote: niente (come in stampa) invece di [VARn]
@@ -433,11 +570,120 @@ const BCID_MAP = {
   'PDF417': 'pdf417', 'MICROPDF417': 'micropdf417',
   'AZTEC': 'azteccode', 'QRCODE': 'qrcode', 'QR': 'qrcode',
   'I2OF5': 'interleaved2of5', 'INT2OF5': 'interleaved2of5',
+  'CODE16K': 'code16k', 'CODE49': 'code49',
+  // QTCODE (nome del QR nel manuale) non viene stampato: refuso, usare QRCODE (verificato su stampa)
+  // Tipi del manuale confrontati su stampa (test-tipi-1d.lbl, 2026-10-23): larghezze uguali entro 2–3 dot
+  'CODABAR': 'rationalizedCodabar', 'CODE39A': 'code39ext', 'CODE39C': ['code39', { includecheck: true }],
+  'C2OF5': 'code2of5', 'C2OF5IND': 'iata2of5', 'C2OF5INDC': ['iata2of5', { includecheck: true }],
+  'C2OF5MAT': ['datalogic2of5', { includecheck: true }],
+  'INT2OF5C': ['interleaved2of5', { includecheck: true }], 'I2OF5A': 'interleaved2of5',
+  'DUN': ['interleaved2of5', { includecheck: true }], 'UPCSCC': ['interleaved2of5', { includecheck: true }],   // + bordo, vedi BEARER
+  'UCC128': 'code128', 'ADDON2': 'ean2', 'ADDON5': 'ean5', 'POSTNET': 'postnet',
+  // MSI: stampante senza cifra di controllo e barre larghe 3:1 (bwip 2:1) → immagine allargata di 4/3 (3° elemento)
+  'MSI': ['msi', {}, 4 / 3],
+  // SCCADDON: in stampa è un 2/5 interleaved con cifra di controllo, mostrata anche nel testo BF (test-aperti.lbl, 2026-10-27)
+  'SCCADDON': ['interleaved2of5', { includecheck: true }],
+  // Disegnati in proprio (CUSTOM_BARS): bwip-js non ha lo stesso rapporto barre della stampante
+  'CODE11': 'code11', 'PLESSEY': 'plessey',
 }
-function getBcid(t) { return t ? (BCID_MAP[(t || '').toUpperCase()] || 'code128') : 'code128' }
+// Tipi con cornice (bearer bar) attorno alle barre, come in stampa
+const BEARER = new Set(['DUN', 'UPCSCC'])
+// Tipo → { bcid, opts } di bwip-js; senza tipo = INT2OF5 (default del manuale); tipo non gestito = null (segnaposto).
+// UPCD1–5 non vengono stampati dalla stampante: restano senza corrispondenza.
+function getBwip(t) {
+  const v = BCID_MAP[(t || 'INT2OF5').toUpperCase()]
+  if (!v) return null
+  const [bcid, opts = {}, sx = 1] = Array.isArray(v) ? v : [v]
+  return { bcid, opts, sx }
+}
 // bwip-js disegna questi 2D a 2 px per modulo (a scale 1), i lineari e PDF417 a 1 px
 const BWIP_2PX = new Set(['datamatrix', 'gs1datamatrix', 'qrcode', 'azteccode'])
 const BWIP_2D  = new Set([...BWIP_2PX, 'pdf417', 'micropdf417'])  // niente BH/height
+const BWIP_STACKED = new Set(['code16k', 'code49'])                 // righe impilate: altezza riga = BH
+
+// DataMatrix ECC200 quadrati: [lato, codeword dati]
+const DM_SIZES = [[10,3],[12,5],[14,8],[16,12],[18,18],[20,22],[22,30],[24,36],[26,44],[32,62],[36,86],[40,114],
+  [44,144],[48,174],[52,204],[64,280],[72,368],[80,456],[88,576],[96,696],[104,816],[120,1050],[132,1304],[144,1558]]
+// Codeword come la stampante: il minimo tra ASCII (2 cifre = 1 codeword) e tutto il dato in C40 o in Text
+// senza ottimizzazioni di chiusura (latch + 2 codeword ogni 3 valori + unlatch + resto in ASCII).
+// Verificato su stampa: "ABCDEFGHIJKLMNOP" → 18×18 (bwip-js da solo 16×16), 24 minuscole → 18×18 (Text), 31 cifre → 18×18
+function dmCodewords(text) {
+  let cw = 0
+  for (let i = 0; i < text.length; i++) {
+    if (/\d/.test(text[i]) && /\d/.test(text[i + 1] ?? '')) { cw++; i++ }
+    else cw += text.charCodeAt(i) > 127 ? 2 : 1
+  }
+  // C40: maiuscole, cifre e spazio = 1 valore, altri ASCII = 2 (shift); Text: uguale con le minuscole
+  const triplets = basic => {
+    if ([...text].some(c => c.charCodeAt(0) > 127)) return Infinity
+    const v = [...text].reduce((n, c) => n + (basic.test(c) ? 1 : 2), 0)
+    return 1 + 2 * Math.floor(v / 3) + 1 + v % 3
+  }
+  return Math.min(cw, triplets(/[A-Z0-9 ]/), triplets(/[a-z0-9 ]/))
+}
+// ── Barre disegnate in proprio (verificate su stampa, test-aperti.lbl, 2026-10-27) ──
+// Elementi [barra, spazio, barra, …] in unità di barra stretta (= BM dot).
+// CODE11: larghe 2:1 fisse (BR ignorato), nessuna cifra di controllo
+const C11_PAT = { '0': '00001', '1': '10001', '2': '01001', '3': '11000', '4': '00101', '5': '10100',
+  '6': '01100', '7': '00011', '8': '10010', '9': '10000', '-': '00100', '*': '00110' }
+function code11Elements(text) {
+  return ['*', ...text.replace(/[^0-9-]/g, ''), '*'].flatMap((c, i) =>
+    [...(i ? [1] : []), ...[...C11_PAT[c]].map(b => b === '1' ? 2 : 1)])
+}
+// PLESSEY: ogni bit = larga+stretta (1) o stretta+larga (0) con larga = BR; start 1101, cifre bit basso prima,
+// CRC-8 (polinomio 0x1E9), chiusura di 5 celle. Larghezza = (4·cifre + 17) × BM × (1 + rapporto)
+function plesseyElements(text, r) {
+  const bits = [1, 1, 0, 1]
+  for (const c of text.replace(/[^0-9A-F]/gi, '')) for (let i = 0; i < 4; i++) bits.push((parseInt(c, 16) >> i) & 1)
+  const reg = [...bits.slice(4), 0, 0, 0, 0, 0, 0, 0, 0], poly = [1, 1, 1, 1, 0, 1, 0, 0, 1]
+  for (let i = 0; i < reg.length - 8; i++) if (reg[i]) poly.forEach((p, j) => { reg[i + j] ^= p })
+  bits.push(...reg.slice(-8))
+  return [...bits.flatMap(b => b ? [r, 1] : [1, r]), 1 + r, r, 1, r, 1, 1, r, 1, r]
+}
+// Canvas a 1 px per dot; `bearer` = [alto, basso] barre orizzontali piene in dot (PLESSEY: larga sopra, stretta sotto)
+function barsCanvas(els, n, h, bearer) {
+  const c = document.createElement('canvas')
+  c.width = Math.round(els.reduce((a, b) => a + b, 0) * n); c.height = h
+  const g = c.getContext('2d'); g.fillStyle = '#000'
+  let x = 0
+  els.forEach((w, i) => { if (i % 2 === 0) g.fillRect(Math.round(x), 0, Math.round(x + w * n) - Math.round(x), h); x += w * n })
+  if (bearer) { g.fillRect(0, 0, c.width, bearer[0]); g.fillRect(0, h - bearer[1], c.width, bearer[1]) }
+  return c
+}
+const CUSTOM_BARS = {
+  code11:  (t, el, n) => barsCanvas(code11Elements(t), n, el.barcodeHeight || 100),
+  plessey: (t, el, n) => {
+    const r = (el.barcodeWide || 3) / (el.barcodeNarrow || 1)
+    return barsCanvas(plesseyElements(t, r), n, el.barcodeHeight || 100, [Math.round(n * r), n])
+  },
+}
+// Cifra di controllo modulo 10 del 2/5 interleaved (pesi 3,1 da destra), mostrata nel testo BF di SCCADDON
+const i25Check = t => String((10 - [...t].reverse().reduce((s, d, i) => s + (+d || 0) * (i % 2 ? 1 : 3), 0) % 10) % 10)
+// BF ON su EAN/UPC e add-on: la stampante usa l'interpretazione standard (cifre spezzate sotto le barre,
+// guardie allungate; add-on con cifre sopra) = includetext di bwip-js, stessa altezza in stampa
+const BWIP_INCLTEXT = new Set(['ean13', 'ean8', 'upca', 'upce', 'ean2', 'ean5'])
+// BF OFF su EAN/UPC (verificato su stampa, test-cursore-ean.lbl, 2026-10-27): simbolo alto BH, le barre lunghe
+// (guardie, prima/ultima cifra UPC-A) arrivano in fondo, le altre si fermano `ext` dot prima (6 moduli).
+// Si parte dall'immagine includetext di bwip-js: barre lunghe = quelle più lunghe del minimo.
+function eanGuards(src, h, ext) {
+  const W = src.width, d = src.getContext('2d').getImageData(0, 0, W, src.height).data
+  const dark = (i, j) => d[(j * W + i) * 4 + 3] > 0 && d[(j * W + i) * 4] < 128
+  const run  = i => { let j = 0; while (j < src.height && dark(i, j)) j++; return j }
+  const cols = [...Array(W).keys()].filter(i => dark(i, 0))
+  const mb = Math.min(...cols.map(run))
+  const c = document.createElement('canvas'); c.width = cols.at(-1) - cols[0] + 1; c.height = h
+  const g = c.getContext('2d'); g.fillStyle = '#000'
+  for (const i of cols) g.fillRect(i - cols[0], 0, 1, run(i) > mb ? h : h - ext)
+  return c
+}
+
+// Lato del DataMatrix: 7° parametro BARSET (barcodeParams[5]) = N ≥ 1 → N-esimo formato di DM_SIZES (1 = 10×10 … 12 = 40×40),
+// altrimenti il più piccolo che contiene il dato in ASCII (verificato su stampa, test-dm-parametri.lbl)
+function dmSize(text, sizeIndex) {
+  if (Number.isInteger(sizeIndex) && sizeIndex >= 1) return DM_SIZES[Math.min(sizeIndex, DM_SIZES.length) - 1]
+  const cw = dmCodewords(text)
+  return DM_SIZES.find(([, cap]) => cap >= cw) ?? null
+}
 
 function applySettings() {
   labelDots.w = Math.round(settings.widthMm  * settings.dotsPerMm)
@@ -503,16 +749,18 @@ function onSourceInput() {
 async function checkFonts() {
   const names = [...new Set(
     parsed.value.elements
-      .map(e => e.fontName)   // testi e PX con testo
+      .flatMap(e => [e.fontName, e.barFont?.name])   // testi, PX con testo e barfont
       .filter(Boolean)
   )]
-  const missing = new Set()
-  for (const name of names) {
-    // document.fonts.check richiede dimensione + famiglia
-    const available = document.fonts.check(`16px "${name}"`)
-    if (!available) missing.add(name)
-  }
-  missingFonts.value = missing
+  missingFonts.value = new Set(names.filter(n => !fontInstalled(n)))
+}
+
+// document.fonts.check dà true anche per i font di sistema assenti: si confronta la larghezza di un testo
+// col font richiesto e con i font generici. Se non cambia rispetto a nessuno dei due, il font non c'è
+const fontProbe = document.createElement('canvas').getContext('2d')
+function fontInstalled(name) {
+  const w = family => { fontProbe.font = `40px ${family}`; return fontProbe.measureText('mmmmmmmmmmlli WQ@#0123').width }
+  return ['monospace', 'serif'].some(g => w(`"${name}",${g}`) !== w(g))
 }
 
 // ── Variabili ──────────────────────────────────────────────────────────────
@@ -659,6 +907,12 @@ function wrapLines(ctx, text, delim, maxW, kx) {
 }
 
 const PT_TO_MM = 25.4 / 72  // Fingerprint font size è in punti tipografici
+// Larghezza dei font della stampante rispetto al font del PC (Swiss 721 → Arial, stesse metriche Helvetica):
+// a parità di altezza la stampante è ~5% più stretta (verificato su stampa, test-mag.lbl e test-xor.lbl, 2026-10-27)
+const FONT_KX = { 'swiss 721 bt': 0.95, 'swiss 721 bold bt': 0.95 }
+const fontKx = name => FONT_KX[(name || '').toLowerCase()] ?? 1
+// Font mancante senza sostituto calibrato → testo rosso in anteprima (Swiss 721 → Arial è calibrato: nero)
+const fontRed = name => missingFonts.value.has(name) && !FONT_KX[(name || '').toLowerCase()]
 
 // Cella del carattere misurata su stampa (Swiss 721, frazioni dell'em = dimensione FT):
 // sopra la linea di base 1.1 em, sotto 0.2 em
@@ -715,7 +969,7 @@ function resolveContent(content, forBarcode = false) {
       if (forBarcode && v.previewValue) return v.previewValue
       return hideEmpty.value ? '' : `[VAR${p.index}]`   // come la stampante: variabile vuota = niente
     }
-    return `[${p.value}]`
+    return evalExpr(p.value, p.clock) ?? `[${p.value}]`
   }).join('')
 }
 
@@ -749,9 +1003,34 @@ function renderCanvas() {
   ctx.fillStyle = '#fff'
   ctx.fillRect(0, 0, W, H)
 
-  for (const el of parsed.value.elements) {
-    drawEl(ctx, el, scale)
+  // Ri-parse con i barcode in errore: la riga si interrompe come in stampa (dipende dai valori delle variabili)
+  const run = parseLayout(layoutSource.value, barcodeFails)
+  // La stampante salva i nomi delle immagini in maiuscolo: un PM con minuscole non trova l'immagine
+  const lower = [...new Set(run.elements.filter(e => e.type === 'image').map(imageName).filter(n => n && n !== n.toUpperCase()))]
+  parseWarnings.value = [...run.warnings, ...lower.map(n => `Immagine "${n}": in stampante i nomi sono maiuscoli, usa "${n.toUpperCase()}"`)]
+  let cur = null   // cursore runtime della stampante (dot)
+  for (const el of run.elements) {
+    const pos = el.follow && cur ? cur : { x: el.x, y: el.y }
+    const at  = el.follow && cur ? { ...el, ...cur } : el
+    // II ignora XORMODE: cella nera e testo bianco coprono quello che c'è sotto (verificato su stampa, test-xor.lbl)
+    const adv = el.xor && !el.invert ? drawXor(ctx, at, scale) : drawEl(ctx, at, scale)
+    const [vx, vy] = DIR_VEC[el.dir] || DIR_VEC[1]
+    // avanzamento lungo DIR + salita perpendicolare (verso l'alto in DIR 1, ruotata con DIR)
+    cur = adv === null ? pos : { x: pos.x + vx * adv[0] - vy * adv[1], y: pos.y + vy * adv[0] + vx * adv[1] }
   }
+}
+
+// XORMODE ON: il campo si disegna su un livello bianco, si inverte (inchiostro = bianco) e si unisce con
+// `difference`: dove c'era bianco esce nero, dove c'era già nero esce bianco (manuale p.24)
+function drawXor(ctx, el, scale) {
+  const layer = document.createElement('canvas')
+  layer.width = ctx.canvas.width; layer.height = ctx.canvas.height
+  const lc = layer.getContext('2d')
+  lc.fillStyle = '#fff'; lc.fillRect(0, 0, layer.width, layer.height)
+  const adv = drawEl(lc, el, scale)
+  lc.globalCompositeOperation = 'difference'; lc.fillRect(0, 0, layer.width, layer.height)
+  ctx.save(); ctx.globalCompositeOperation = 'difference'; ctx.drawImage(layer, 0, 0); ctx.restore()
+  return adv
 }
 
 // PX con testo multi-riga: AN posiziona il box sul PP e allinea il testo dentro il box (manuale p.22, 40).
@@ -765,9 +1044,10 @@ function drawTextBox(ctx, el, scale) {
     ctx.strokeStyle = '#000'; ctx.lineWidth = t
     ctx.strokeRect(t / 2, -h + t / 2, w - t, h - t)
   }
-  const { css, sizePx } = fontCss(el, scale)
-  const isMissing = missingFonts.value.has(el.fontName)
-  const kx = (el.fontWidth || 100) / 100
+  const { css, sizePx: em } = fontCss(el, scale)
+  const isMissing = fontRed(el.fontName)
+  const kx =(el.fontWidth || 100) / 100 * (el.magW || 1) * fontKx(el.fontName), ky = el.magH || 1   // larghezza %, MAG, font
+  const sizePx = em * ky
   ctx.font = css; ctx.fillStyle = isMissing ? '#dc2626' : '#000'
   ctx.textAlign = AN[el.align]?.a || 'left'; ctx.textBaseline = 'top'
   // Cornice del testo: bordo interno + offset; vOff è anche lo spazio fra le righe
@@ -779,28 +1059,101 @@ function drawTextBox(ctx, el, scale) {
   const y0 = -h + inV + (1 - fy) * (frameH - blockH)
   lines.forEach((line, i) => {
     ctx.save()
-    ctx.translate(x0, y0 + i * (sizePx + gap)); ctx.scale(kx, 1)
+    ctx.translate(x0, y0 + i * (sizePx + gap)); ctx.scale(kx, ky)
     ctx.fillText(line, 0, 0)
     ctx.restore()
   })
 }
 
+// Disegna un oggetto; ritorna di quanti dot avanza il cursore lungo DIR (null = non avanza)
+// Barcode che in stampa dà errore. Dato non ancora noto ([VARn], espressioni) o bwip-js non caricato: si assume stampabile
+function barcodeFails(el) {
+  const t = resolveContent(el.content, true)
+  if (!t || t.startsWith('[')) return false
+  if (!getBwip(el.barcodeType)) return true   // tipo che la stampante non stampa (MAXICODE, UPCD1–5, QTCODE, …)
+  return !!bwipjsLib && !barcodeImage(el, t).offCanvas
+}
+
+// Immagine del barcode (dot, cache): null = non stampabile (tipo non gestito, dato non valido, PDF417 che non entra).
+// Usata dal disegno e dal parser per simulare l'interruzione della riga dopo un errore
+function barcodeImage(el, bcText) {
+  const bw_   = getBwip(el.barcodeType)
+  const bcid  = bw_?.bcid
+  // Modulo (barra stretta / cella 2D) in dot = BM. BR/narrow è solo il rapporto larghe:strette
+  // (verificato su stampa: BR 4,2 + BM 4 → CODE128 a 4 dot per modulo) → bwipScale = dot per modulo.
+  // POSTNET ha misura fissa (22 barre/pollice, alte 1/8"): non dipende da BM né da BH
+  const bwipScale = bcid === 'postnet' ? Math.max(1, Math.round(settings.dotsPerMm / 3))
+                                      : Math.max(1, Math.round(el.barcodeMag || 1))
+  const inclText = !!el.barFont && BWIP_INCLTEXT.has(bcid)
+  const isAddon  = bcid === 'ean2' || bcid === 'ean5'
+  const cacheKey = `${el.barcodeType}|${bcText}|${bwipScale}|${el.barcodeHeight}|${(el.barcodeParams || []).join(',')}` +
+                   `|${el.barcodeWide}/${el.barcodeNarrow}|${inclText}`
+  if (barcodeCache.has(cacheKey)) return { offCanvas: barcodeCache.get(cacheKey), bw_, bcid, bwipScale, inclText, isAddon }
+  let offCanvas = null
+  if (CUSTOM_BARS[bcid] && bcText && !bcText.startsWith('[')) {
+    offCanvas = CUSTOM_BARS[bcid](bcText, el, bwipScale)
+    barcodeCache.set(cacheKey, offCanvas)
+  }
+  if (!offCanvas && bcid && bwipjsLib && bcText && !bcText.startsWith('[')) {
+    try {
+      offCanvas = document.createElement('canvas')
+      // height bwip-js in mm a 72 dpi × scale → altezza barre = barcodeHeight dot (solo lineari)
+      const opts = { bcid, text: bcText, scale: bwipScale, padding: 0, ...bw_.opts }
+      const p = el.barcodeParams || []
+      if (bcid === 'pdf417') {
+        // Stampante: colonne [8] valide 1–30 altrimenti 1, righe [7] valide 3–90, sicurezza [4] default 2,
+        // altezza BARSET = altezza riga in dot (verificato su stampa: righe 32 + colonne 32 → 1 colonna, 173×191)
+        Object.assign(opts, { columns: p[8] >= 1 && p[8] <= 30 ? p[8] : 1, eclevel: Number.isInteger(p[4]) ? p[4] : 2,
+          rowmult: Math.max(1, Math.round((el.barcodeHeight || 6) / bwipScale)) })
+        if (p[7] >= 3 && p[7] <= 90) opts.rows = p[7]
+        // Colonne fissate senza righe: la stampante non stampa (verificato su stampa, colonne 3 righe 0)
+        else if (p[8] >= 1 && p[8] <= 30) throw new Error('PDF417: colonne senza righe')
+      } else if (bcid === 'upce') {
+        // Stampante: solo le 6 cifre compresse, sistema 0 e cifra di controllo aggiunti da lei; 7, 8, 11, 12 cifre → errore
+        // (verificato su stampa, test-upce.lbl, 2026-10-27: "425261" → 0 425261 4)
+        if (!/^\d{6}$/.test(bcText)) throw new Error('UPCE: servono 6 cifre')
+        opts.text = '0' + bcText
+        opts.height = (el.barcodeHeight || 100) / bwipScale * 25.4 / 72
+      } else if (bcid === 'datamatrix') {
+        const [size, cap] = dmSize(bcText, p[5]) ?? []
+        if (size) opts.rows = opts.columns = size
+        // Dimensione forzata troppo piccola: la stampante stampa comunque quel formato (dato troncato)
+        while (cap && opts.text.length > 1 && dmCodewords(opts.text) > cap) opts.text = opts.text.slice(0, -1)
+      } else if (!BWIP_2D.has(bcid) && !BWIP_STACKED.has(bcid) && bcid !== 'postnet')
+        opts.height = (el.barcodeHeight || 100) / bwipScale * 25.4 / 72
+      const eanGuard = BWIP_INCLTEXT.has(bcid) && !isAddon && !inclText
+      if (inclText || eanGuard) opts.includetext = true
+      bwipjsLib.toCanvas(offCanvas, opts)
+      if (eanGuard) offCanvas = eanGuards(offCanvas, el.barcodeHeight || 100, 6 * bwipScale)
+      // PDF417 con righe fissate in cui il dato non entra: bwip-js aggiunge righe, la stampante non stampa nulla
+      if (bcid === 'pdf417' && opts.rows && offCanvas.height / (bwipScale * opts.rowmult) > opts.rows + 0.5)
+        throw new Error('PDF417: dato troppo lungo per le righe indicate')
+      barcodeCache.set(cacheKey, offCanvas)
+    } catch { offCanvas = null; barcodeCache.set(cacheKey, null) }
+  }
+  return { offCanvas, bw_, bcid, bwipScale, inclText, isAddon }
+}
+
 function drawEl(ctx, el, scale) {
+  let len = null   // lunghezza dell'oggetto lungo la direzione, in px canvas
+  let rise = 0     // spostamento del cursore perpendicolare alla direzione (verso l'alto in DIR 1), in dot
   ctx.save()
   ctx.translate(cx(el.x, scale), cy(el.y, scale))
 
   if (el.type === 'text') {
     const { css, sizePx } = fontCss(el, scale)
     const anInfo   = AN[el.align] || AN[1]
-    const isMissing = missingFonts.value.has(el.fontName)
-    ctx.font         = css
+    const isMissing = fontRed(el.fontName)
+    ctx.font        = css
     ctx.fillStyle    = isMissing ? '#dc2626' : '#000'
     ctx.textAlign    = anInfo.a
     ctx.textBaseline = 'alphabetic'
     ctx.rotate(dirRad(el))   // DIR 2/3/4: testo ruotato in senso orario attorno al PP
-    if (el.fontWidth && el.fontWidth !== 100) ctx.scale(el.fontWidth / 100, 1)  // larghezza % orizzontale
+    const kx = (el.magW || 1) * (el.fontWidth || 100) / 100 * fontKx(el.fontName)
+    ctx.scale(kx, el.magH || 1)   // MAG, larghezza % e font stampante (la cella si ingrandisce con il testo)
     const yBase = textBaselineY(el.align, sizePx)
     const text  = resolveContent(el.content)
+    len = ctx.measureText(text).width * kx
     if (el.invert && text) {   // II: cella del testo nera, testo bianco
       const w = ctx.measureText(text).width
       const x0 = anInfo.a === 'right' ? -w : anInfo.a === 'center' ? -w / 2 : 0
@@ -848,46 +1201,74 @@ function drawEl(ctx, el, scale) {
 
   } else if (el.type === 'barcode') {
     const bcText = resolveContent(el.content, true)
-    const bcid   = getBcid(el.barcodeType)
-    // Modulo (barra stretta / cella 2D) in dot = BM. BR/narrow è solo il rapporto larghe:strette
-    // (verificato su stampa: BR 4,2 + BM 4 → CODE128 a 4 dot per modulo) → bwipScale = dot per modulo
-    const bwipScale = Math.max(1, Math.round(el.barcodeMag || 1))
-    const cacheKey = `${bcid}|${bcText}|${bwipScale}|${el.barcodeHeight}`
-    let offCanvas = barcodeCache.get(cacheKey)
-    if (!offCanvas && bwipjsLib && bcText && !bcText.startsWith('[')) {
-      try {
-        offCanvas = document.createElement('canvas')
-        // height bwip-js in mm a 72 dpi × scale → altezza barre = barcodeHeight dot (solo lineari)
-        const opts = { bcid, text: bcText, scale: bwipScale, padding: 0 }
-        if (!BWIP_2D.has(bcid)) opts.height = (el.barcodeHeight || 100) / bwipScale * 25.4 / 72
-        bwipjsLib.toCanvas(offCanvas, opts)
-        barcodeCache.set(cacheKey, offCanvas)
-      } catch { offCanvas = null; barcodeCache.set(cacheKey, null) }
-    }
+    const { offCanvas, bw_, bcid, bwipScale, inclText, isAddon } = barcodeImage(el, bcText)
     if (offCanvas) {
       const k  = BWIP_2PX.has(bcid) ? 2 : 1
-      const bh = offCanvas.height / k * scale
-      const bw = offCanvas.width  / k * scale
+      // CODE16K/CODE49: bwip-js ha righe da almeno 8 moduli; in stampa ogni riga è alta BH dot
+      const stackRows = BWIP_STACKED.has(bcid) ? Math.round((offCanvas.height / bwipScale - 1) / 9) : 0
+      const bh = stackRows ? stackRows * (el.barcodeHeight || 8) * scale : offCanvas.height / k * scale
+      const bw = offCanvas.width  / k * scale * bw_.sx
+      // includetext (EAN/UPC): le barre stanno sul PP, le cifre fuori dalle barre sporgono a sx/dx
+      let x0 = 0, barsW = bw
+      if (inclText) {
+        const row = offCanvas.getContext('2d').getImageData(0, isAddon ? offCanvas.height - 1 : 0, offCanvas.width, 1).data
+        const dark = [...Array(offCanvas.width).keys()].filter(i => row[i * 4 + 3] > 0 && row[i * 4] < 128)
+        if (dark.length) { x0 = dark[0] * scale; barsW = (dark.at(-1) - dark[0] + 1) * scale }
+      }
       ctx.imageSmoothingEnabled = false
-      // BF ON (solo lineari): testo sotto le barre, allineato a sx; il campo = barre + offset + cella testo
-      // e AN vale per tutto il campo (verificato su stampa)
-      const bf  = el.barFont && !BWIP_2D.has(bcid) ? el.barFont : null
-      const bfEm = bf ? bf.size * PT_TO_MM * settings.dotsPerMm * scale : 0
-      const fieldH = bf ? bh + bf.offset * scale + (CELL_ASC + CELL_DESC) * bfEm : bh
-      applyAlign(ctx, el, bw, fieldH)
+      // BF ON: testo = dato del barcode allineato a sx (verificato su stampa).
+      // Lineari, DataMatrix/QR/Aztec: sotto il simbolo, campo = simbolo + offset + cella testo, AN vale per tutto il campo.
+      // PLESSEY: testo sopra le barre (barre sul PP). PDF417: testo sotto il PP, fuori dal campo; cursore a fine barre.
+      // EAN/UPC/add-on: interpretazione standard di bwip-js (inclText)
+      const bf  = el.barFont && !inclText ? el.barFont : null
+      const bfMode = !bf ? null : bcid === 'plessey' ? 'above' : bcid === 'pdf417' || bcid === 'micropdf417' ? 'pdf' : 'below'
+      // Ingrandimento barfont: parametri mag di BF × MAG globale (manuale: MAG vale anche per il barfont)
+      const bfMagH = bf ? (bf.magH || 1) * (el.magH || 1) : 1, bfMagW = bf ? (bf.magW || 1) * (el.magW || 1) * fontKx(bf.name) : 1
+      const bfEm = bf ? bf.size * PT_TO_MM * settings.dotsPerMm * scale * bfMagH : 0
+      const bfCell = bf ? bf.offset * scale + (CELL_ASC + CELL_DESC) * bfEm : 0
+      // EAN/UPC con BF ON: sotto le cifre resta uno spazio di ~3.5 moduli fino al PP (verificato su stampa)
+      const eanGap = inclText && !isAddon ? Math.round(3.5 * bwipScale) * scale : 0
+      const fieldH = bfMode === 'below' || bfMode === 'above' ? bh + bfCell : bh + eanGap
+      applyAlign(ctx, el, barsW, fieldH)
       // Lato-L (angolo in basso a sx in DIR 1) sul PP, poi rotazione oraria DIR (verificato su stampa):
       // DIR 1 destra-su · 2 destra-giù · 3 sinistra-giù · 4 sinistra-su
       ctx.rotate(dirRad(el))
-      ctx.drawImage(offCanvas, 0, -fieldH, bw, bh)
+      const barsY = bfMode === 'below' ? -fieldH : -bh - eanGap
+      ctx.drawImage(offCanvas, -x0, barsY, bw, bh)
+      if (BEARER.has((el.barcodeType || '').toUpperCase())) {   // cornice spessa 2 moduli (DUN, UPCSCC)
+        const t = 2 * bwipScale * scale
+        ctx.strokeStyle = '#000'; ctx.lineWidth = t
+        ctx.strokeRect(t / 2, barsY + t / 2, bw - t, bh - t)
+      }
+      len = barsW
+      // Cursore (verificato su stampa, test-cursore-ean.lbl): EAN/UPC non avanzano mai lungo DIR;
+      // con BF ON salgono al fondo delle barre corte (sopra le cifre). Add-on con BF ON: fine delle cifre
+      // (passo 6.4 moduli), riga del testo sopra le barre; con BF OFF fine barre come gli altri lineari
+      if (BWIP_INCLTEXT.has(bcid) && !isAddon) {
+        len = 0
+        if (inclText) rise = eanGap / scale + offCanvas.height - (el.barcodeHeight || 100)
+      } else if (inclText) {
+        len = bcText.length * 6.4 * bwipScale * scale
+        rise = (el.barcodeHeight || 100) + 4 * bwipScale
+      }
       if (bf) {
+        const bfText = (el.barcodeType || '').toUpperCase() === 'SCCADDON' ? bcText + i25Check(bcText) : bcText
         ctx.font = fontCss({ fontName: bf.name, fontSize: bf.size, fontSlant: bf.slant }, scale).css
         ctx.fillStyle = '#000'; ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic'
-        ctx.fillText(bcText, 0, -CELL_DESC * bfEm)
+        const baseY = bfMode === 'above' ? -bh - bf.offset * scale - CELL_DESC * bfEm
+                    : bfMode === 'pdf'   ? bf.offset * scale + CELL_ASC * bfEm : -CELL_DESC * bfEm
+        ctx.save(); ctx.translate(0, baseY); ctx.scale(bfMagW, bfMagH)
+        ctx.fillText(bfText, 0, 0)
+        ctx.restore()
+        // con BF ON il cursore va a fine testo, anche in altezza (PLESSEY: riga del testo sopra le barre)
+        if (bfMode !== 'pdf') len = ctx.measureText(bfText).width * bfMagW
+        if (bfMode === 'above') rise = bh / scale + bf.offset
       }
     } else if (!(hideEmpty.value && !bcText)) {
       // Fallback placeholder (nascosto se il dato è vuoto e "Nascondi variabili vuote" è attivo)
       const mag = el.barcodeMag || 1
       const sz  = Math.max(30, 50 * mag * 0.15) * scale
+      len = sz
       applyAlign(ctx, { ...el, dir: 1 }, sz, sz)   // il segnaposto non ruota
       ctx.fillStyle   = '#f7f7f7'
       ctx.strokeStyle = '#999'
@@ -910,18 +1291,18 @@ function drawEl(ctx, el, scale) {
     const name  = imageName(el)
     const entry = name && imageStore.get(name)
     if (entry?.img) {
-      // 1 pixel del BMP = 1 dot stampante; convertiamo in canvas pixels
-      const imgW = entry.img.naturalWidth  * scale
-      const imgH = entry.img.naturalHeight * scale
-      const d    = el.dir || 1
-      // BMP già ruotato (.2 per DIR 2/4): lungo la direzione c'è la sua altezza
-      if (d % 2) applyAlign(ctx, el, imgW, imgH); else applyAlign(ctx, el, imgH, imgW)
-      if      (d === 3) ctx.drawImage(entry.img, -imgW,    0, imgW, imgH)
-      else if (d === 2) ctx.drawImage(entry.img,     0,    0, imgW, imgH)
-      else if (d === 4) ctx.drawImage(entry.img, -imgW, -imgH, imgW, imgH)
-      else              ctx.drawImage(entry.img,     0, -imgH, imgW, imgH)
+      // 1 pixel del BMP = 1 dot stampante (× MAG); convertiamo in canvas pixels
+      const imgW = entry.img.naturalWidth  * (el.magW || 1) * scale
+      const imgH = entry.img.naturalHeight * (el.magH || 1) * scale
+      ctx.imageSmoothingEnabled = false
+      // La stampante ruota il BMP con DIR come ogni altro oggetto (verificato su stampa)
+      applyAlign(ctx, el, imgW, imgH)
+      ctx.rotate(dirRad(el))
+      ctx.drawImage(entry.img, 0, -imgH, imgW, imgH)
+      len = imgW
     } else if (!(hideEmpty.value && !name)) {   // logo variabile vuoto: niente
       const w = 80 * scale, h = 28 * scale
+      len = w
       applyAlign(ctx, { ...el, dir: 1 }, w, h)   // il segnaposto non ruota
       ctx.fillStyle   = '#f9f9f9'
       ctx.strokeStyle = '#bbb'
@@ -939,7 +1320,12 @@ function drawEl(ctx, el, scale) {
   }
 
   ctx.restore()
+  // Testo, barcode e immagini spostano il cursore sul loro bordo finale lungo DIR; linee e box no (verificato su stampa)
+  return len === null ? null : [(1 - anFrac(el.align)[0]) * len / scale, rise]
 }
+
+// Vettore unitario della direzione di stampa in coordinate Fingerprint (Y in su)
+const DIR_VEC = { 1: [1, 0], 2: [0, -1], 3: [-1, 0], 4: [0, 1] }
 
 // ── Aggiornamento canvas ──────────────────────────────────────────────────
 // Il canvas si ridisegna solo su:
