@@ -83,10 +83,12 @@
         <div v-if="missingFonts.size" class="missing-fonts-box mt-1">
           <div class="flex align-items-center gap-1 mb-1">
             <i class="pi pi-times-circle" style="color:#dc2626;font-size:11px"></i>
-            <span style="color:#dc2626;font-weight:700;font-size:11px">Font non installati</span>
+            <span style="color:#dc2626;font-weight:700;font-size:11px">Font non installati sul PC</span>
           </div>
           <div v-for="f in [...missingFonts]" :key="f" class="missing-font-row">
-            {{ f }}<span v-if="fontKx(f) !== 1" style="color:#6b7280"> → Arial (larghezza calibrata)</span>
+            {{ f }}<span v-if="!fontRed(f)" style="color:#6b7280"> → {{ fontSubName(f) }} (larghezza calibrata)</span>
+            <div v-else class="pl-2" style="color:#dc2626">non installato sul PC e non calibrato: anteprima con {{ fontSubName(f) }}, larghezza indicativa</div>
+            <div v-if="fontHeightNote(f)" class="pl-2" style="color:#6b7280">altezza in stampa: possibili leggere variazioni</div>
           </div>
         </div>
       </div>
@@ -118,16 +120,6 @@
         class="flex flex-column gap-3"
         style="width: 280px; min-width: 200px; overflow-y: auto; padding-right: 4px"
       >
-        <!-- Font mancanti -->
-        <div v-if="missingFonts.size" class="flex flex-column gap-1">
-          <div class="section-label" style="color:#b91c1c">
-            <i class="pi pi-exclamation-circle mr-1"></i>Font non installati
-          </div>
-          <div v-for="fn in [...missingFonts]" :key="fn" class="text-xs" :style="{ color: fontKx(fn) !== 1 ? '#6b7280' : '#dc2626' }">
-            {{ fn }}<span v-if="fontKx(fn) !== 1"> → Arial (larghezza calibrata)</span>
-          </div>
-        </div>
-
         <!-- Variabili -->
         <div v-if="variables.length" class="flex flex-column gap-2">
           <div class="section-label">
@@ -205,7 +197,7 @@
             <input
               :id="`img-input-${sanitizeId(img.filename)}`"
               type="file"
-              accept="image/*,.bmp,.BMP"
+              accept=".bmp,image/bmp"
               style="display:none"
               @change="e => onImageFile(img.filename, e)"
             >
@@ -368,13 +360,14 @@ function evalExpr(expr, clock) {
 
 // `fails(el)` (opzionale) dice se un barcode va in errore in stampa: la stampante interrompe la riga e non esegue
 // le istruzioni dopo, nemmeno i cambi di stato (verificato su stampa, test-aperti.lbl, 2026-10-27)
+const ROW_MAX = 150   // caratteri per riga (limite di progetto)
 function parseLayout(source, fails = null) {
-  const result = { layoutName: null, charset: 'UTF-8', clip: false, elements: [], warnings: [], clock: newClock() }
+  const result = { layoutName: null, charset: 'UTF-8', clip: false, feed: 0, elements: [], warnings: [], clock: newClock() }
   const st = { fontName: 'Swiss 721 BT', fontSize: 12, fontSlant: 0, fontWidth: 100,   // default manuale e stampa
                x: 0, y: 0, ppFresh: true, dir: 1, align: 1, invert: false, barcodeType: null, barcodeParams: [],
                barcodeWide: 3, barcodeNarrow: 1, barcodeMag: 2, barcodeHeight: 100,   // default manuale §3.4
                barFont: { on: false, name: 'Swiss 721 BT', size: 12, slant: 0, offset: 6, magH: 1, magW: 1 },
-               magH: 1, magW: 1, xor: false }
+               magH: 1, magW: 1, xor: false, clip: false, clipBc: {} }
   let m
   const checkType = t => { if (!BCID_MAP[t.toUpperCase()]) result.warnings.push(`Tipo barcode non gestito (segnaposto): ${t}`) }
   // Parametri BARSET dalla posizione `pos` (2 = wide) → barcodeParams[pos-2]:
@@ -394,6 +387,13 @@ function parseLayout(source, fails = null) {
     const lineNo = i + 1
     const line = raw.trim()
     if (!line || line.startsWith('//') || line.startsWith("'")) continue
+    // Righe del PLC = T_MaxString (255): una riga più lunga non esce per niente (test-lunghezza-riga.lbl: 256 ok, 276 persa, 2026-11-04)
+    // Limite di progetto 150 (scelto con l'utente, 2026-11-04: oltre ~150 la stampa di test-px-sillabazione non era affidabile)
+    const len = raw.replace(/\r$/, '').length
+    if (len > 255) result.warnings.push(`Riga ${lineNo}: ${len} caratteri, oltre 255 (T_MaxString del PLC): ` +
+      (len > 256 ? 'riga persa in stampa' : "l'ultimo carattere va perso"))
+    else if (len > ROW_MAX) result.warnings.push(`Riga ${lineNo}: ${len} caratteri, oltre il limite di ${ROW_MAX}: dividila su più righe`)
+    if (len > 256) continue
     let onInputLine = false
     for (const stmt of splitStmt(line)) {
       const s = stmt.trim(); if (!s) continue
@@ -407,7 +407,12 @@ function parseLayout(source, fails = null) {
       if (/^LAYOUT\s+(END|RUN)/i.test(s)) continue
       if (/^CLL$/i.test(s)) continue
       if ((m = s.match(/^NASC\s+"([^"]+)"/i)))    { result.charset = m[1]; continue }
-      if ((m = s.match(/^CLIP\s+(ON|OFF)/i)))      { result.clip = m[1].toUpperCase() === 'ON'; continue }
+      if ((m = s.match(/^CLIP\s+(ON|OFF)/i)))      { result.clip = st.clip = m[1].toUpperCase() === 'ON'; continue }
+      // CLIP BARCODE [HEIGHT|INFORMATION|X|Y] ON|OFF: taglio dei barcode (CLIP ON e CLIP BARCODE ON da soli non bastano, test-clip-bc-*.lbl)
+      if ((m = s.match(/^CLIP\s+BARCODE(?:\s+(HEIGHT|INFORMATION|X|Y))?\s+(ON|OFF)$/i))) {
+        if (m[1]) st.clipBc = { ...st.clipBc, [m[1].toLowerCase()]: m[2].toUpperCase() === 'ON' }
+        continue
+      }
       // Orologio e contatori: impostazioni globali della stampante (di solito inviate prima del layout)
       const ck = result.clock
       if ((m = s.match(/^FORMAT\s+DATE\$\s*"([^"]*)"/i)))  { ck.dateFmt = m[1] || 'YYMMDD'; continue }
@@ -423,14 +428,25 @@ function parseLayout(source, fails = null) {
       if ((m = s.match(/^AN\s*(\d)/i)))            { st.align = parseInt(m[1]); continue }
       if (/^(?:II|INVIMAGE)$/i.test(s))            { st.invert = true;  continue }   // testo bianco su nero
       if (/^(?:NI|NORIMAGE)$/i.test(s))            { st.invert = false; continue }
-      // MAG <h>,<w> (1–4): ingrandisce testi e immagini (manuale p.26, 32). Fuori range = errore 1021 → riga interrotta
+      // MAG <h>,<w>: ingrandisce testi e immagini (manuale p.26, 32: 1–4). In stampa anche 5 funziona (test-mag-errore.lbl, 2026-10-28);
+      // il limite vero (errore 1021 "Too large argument for MAG") non è noto → oltre 5 solo avviso, 0 = errore → riga interrotta
       if ((m = s.match(/^MAG\s*(\d+)\s*,\s*(\d+)/i))) {
         const [h, w] = [+m[1], +m[2]]
-        if (h < 1 || h > 4 || w < 1 || w > 4) { result.warnings.push(`Riga ${lineNo}: MAG fuori range (1–4), resto della riga ignorato`); break }
+        if (h < 1 || w < 1) { result.warnings.push(`Riga ${lineNo}: MAG 0 non valido, resto della riga ignorato`); break }
+        if (h > 5 || w > 5) result.warnings.push(`Riga ${lineNo}: MAG oltre 5 non verificato su stampa (possibile errore 1021)`)
         st.magH = h; st.magW = w; continue
       }
       // XORMODE ON: le intersezioni tra campi escono bianche (manuale p.24)
       if ((m = s.match(/^XORMODE\s+(ON|OFF)$/i)))  { st.xor = m[1].toUpperCase() === 'ON'; continue }
+      // PF dentro il layout: nessun effetto (niente reset dei parametri né del PP, tutto su un'etichetta; test-pf.lbl, 2026-10-28)
+      if (/^(?:PF|PRINTFEED)\b/i.test(s)) { result.warnings.push(`Riga ${lineNo}: ${s} dentro il layout ignorato (come in stampa)`); continue }
+      // FORMFEED n dentro il layout: la carta avanza di n dot prima della stampa → sull'etichetta tutto sale di n dot
+      // (test-formfeed.lbl, 2026-10-28: FORMFEED 120 → cornice ~10 mm più in alto, parte alta fuori etichetta; anteprima stampante invariata)
+      if ((m = s.match(/^(?:FORMFEED|FF)\b\s*(-?\d+)?$/i))) {
+        if (m[1]) { result.feed += +m[1]; result.warnings.push(`Riga ${lineNo}: ${s} sposta tutta la stampa di ${m[1]} dot lungo la carta (simulato)`) }
+        else result.warnings.push(`Riga ${lineNo}: ${s} senza lunghezza fa uscire un'etichetta bianca (non simulato)`)
+        continue
+      }
       if ((m = s.match(/^(?:PP|PRPOS)\s*(\d+)\s*,\s*(\d+)/i))) { st.x = parseInt(m[1]); st.y = parseInt(m[2]); st.ppFresh = true; continue }
       if ((m = s.match(/^FT\s*"([^"]+)"(?:\s*,\s*(\d+))?(?:\s*,\s*(\d+))?(?:\s*,\s*(\d+))?/i))) {
         st.fontName = m[1]; st.fontSize = m[2] ? parseInt(m[2]) : 12
@@ -440,7 +456,8 @@ function parseLayout(source, fails = null) {
       // AN e DIR restano validi fino a PF (manuale p.21): non si resettano dopo ogni oggetto
       const font = () => ({ fontName: st.fontName, fontSize: st.fontSize, fontSlant: st.fontSlant, fontWidth: st.fontWidth, invert: st.invert })
       // follow: nessun PP dopo l'ultimo PT/PB/PM → l'oggetto parte dal cursore lasciato da quello (calcolato al disegno)
-      const at = () => ({ x: st.x, y: st.y, follow: !st.ppFresh, dir: st.dir, align: st.align, xor: st.xor, magH: st.magH, magW: st.magW })
+      const at = () => ({ x: st.x, y: st.y, follow: !st.ppFresh, dir: st.dir, align: st.align, xor: st.xor, magH: st.magH, magW: st.magW,
+                        clip: st.clip, clipBc: st.clipBc, line: lineNo })
       if ((m = s.match(/^PT\s*(.*)/i))) {
         result.elements.push({ type: 'text', ...at(), ...font(),
           content: parseContent(m[1].trim(), result.clock) }); st.ppFresh = false; continue
@@ -475,7 +492,10 @@ function parseLayout(source, fails = null) {
           Object.assign(box, font(), { content: parseContent(data, result.clock),
             hOff: parseInt(hOff) || 0, vOff: parseInt(vOff) || 0, delim: unquote(delim) })
         }
-        result.elements.push(box); continue
+        result.elements.push(box)
+        const why = box.content && fails?.(box)
+        if (why) { result.elements.pop(); result.warnings.push(`Riga ${lineNo}: PX non stampabile (${why}), resto della riga ignorato come in stampa`); break }
+        continue
       }
       if ((m = s.match(/^BARSET\s*"([^"]+)"(?:\s*,\s*(.+))?/i))) {
         st.barcodeType = m[1]; checkType(m[1])
@@ -561,13 +581,13 @@ async function loadBwipJs() {
 }
 
 const BCID_MAP = {
-  'DATAMATRIX': 'datamatrix', 'GS1DATAMATRIX': 'gs1datamatrix',
+  'DATAMATRIX': 'datamatrix',   // GS1DATAMATRIX: la stampante non lo stampa (test-gs1dm.lbl, 2026-10-28) → nessuna voce
   'CODE128': 'code128', 'CODE128A': 'code128', 'CODE128B': 'code128', 'CODE128C': 'code128',
   'CODE39': 'code39', 'CODE93': 'code93',
   'EAN13': 'ean13', 'EAN8': 'ean8', 'EAN128': 'gs1-128',
   'GS1-128': 'gs1-128', 'GS1128': 'gs1-128',
   'UPCA': 'upca', 'UPCE': 'upce',
-  'PDF417': 'pdf417', 'MICROPDF417': 'micropdf417',
+  'PDF417': 'pdf417',   // MICROPDF417: la stampante non lo stampa (test-micropdf.lbl, 2026-10-28) → nessuna voce
   'AZTEC': 'azteccode', 'QRCODE': 'qrcode', 'QR': 'qrcode',
   'I2OF5': 'interleaved2of5', 'INT2OF5': 'interleaved2of5',
   'CODE16K': 'code16k', 'CODE49': 'code49',
@@ -597,8 +617,8 @@ function getBwip(t) {
   return { bcid, opts, sx }
 }
 // bwip-js disegna questi 2D a 2 px per modulo (a scale 1), i lineari e PDF417 a 1 px
-const BWIP_2PX = new Set(['datamatrix', 'gs1datamatrix', 'qrcode', 'azteccode'])
-const BWIP_2D  = new Set([...BWIP_2PX, 'pdf417', 'micropdf417'])  // niente BH/height
+const BWIP_2PX = new Set(['datamatrix', 'qrcode', 'azteccode'])
+const BWIP_2D  = new Set([...BWIP_2PX, 'pdf417'])  // niente BH/height
 const BWIP_STACKED = new Set(['code16k', 'code49'])                 // righe impilate: altezza riga = BH
 
 // DataMatrix ECC200 quadrati: [lato, codeword dati]
@@ -662,6 +682,19 @@ const i25Check = t => String((10 - [...t].reverse().reduce((s, d, i) => s + (+d 
 // BF ON su EAN/UPC e add-on: la stampante usa l'interpretazione standard (cifre spezzate sotto le barre,
 // guardie allungate; add-on con cifre sopra) = includetext di bwip-js, stessa altezza in stampa
 const BWIP_INCLTEXT = new Set(['ean13', 'ean8', 'upca', 'upce', 'ean2', 'ean5'])
+// Cifre dell'add-on con BF ON (verificato su stampa, test-addon-qr.lbl, 2026-10-28, BM 2 e 3): barre alte BH,
+// cifre allineate a sx sulle barre, passo 5·BM+3 dot, alte 5·BM+4, base a BH + 2·BM + 8 dal PP. Font BF ignorato.
+// Disegna nel riferimento DIR 1 già ruotato; ritorna il passo in dot
+function addonDigits(ctx, text, bh, bm, scale) {
+  const pitch = 5 * bm + 3
+  ctx.save()
+  ctx.font = `${(5 * bm + 4) / 0.716 * scale}px Arial, Helvetica, sans-serif`   // 0.716 = altezza cifre Arial in em
+  ctx.fillStyle = '#000'; ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic'
+  ;[...text].forEach((c, i) => ctx.fillText(c, i * pitch * scale, -(bh + 2 * bm + 8) * scale))
+  ctx.restore()
+  return pitch
+}
+
 // BF OFF su EAN/UPC (verificato su stampa, test-cursore-ean.lbl, 2026-10-27): simbolo alto BH, le barre lunghe
 // (guardie, prima/ultima cifra UPC-A) arrivano in fondo, le altre si fermano `ext` dot prima (6 moduli).
 // Si parte dall'immagine includetext di bwip-js: barre lunghe = quelle più lunghe del minimo.
@@ -838,6 +871,7 @@ function triggerImageInput(filename) {
 
 function onImageFile(filename, e) {
   const file = e.target.files[0]; if (!file) return
+  if (!/\.bmp$/i.test(file.name)) return   // solo BMP (PCX non gestito)
   const reader = new FileReader()
   reader.onload = ev => {
     const img = new Image()
@@ -892,13 +926,15 @@ function applyAlign(ctx, el, w, h) {
   ctx.translate(dx * Math.cos(r) - dy * Math.sin(r), dx * Math.sin(r) + dy * Math.cos(r))
 }
 
-// Righe di un PX con testo: a capo su delimitatore/CR-LF, poi a parola sulla larghezza (max 20 righe)
+// Righe di un PX con testo: a capo su delimitatore/CR-LF, poi a parola sulla larghezza (max 20 righe).
+// Solo sugli spazi: il trattino non spezza ("ALFA BETA-GAMMA" → "ALFA" / "BETA-GAMMA", test-px-a-capo.lbl, 2026-10-28)
 function wrapLines(ctx, text, delim, maxW, kx) {
   const out = []
   for (const para of delim ? text.split(delim) : text.split(/\r?\n/)) {
     let line = ''
-    for (const word of para.split(/(?<=[\s-])/)) {
-      if (line && ctx.measureText(line + word).width * kx > maxW) { out.push(line.trimEnd()); line = word.trimStart() }
+    for (const word of para.split(/(?<=\s)/)) {
+      // lo spazio dopo l'ultima parola non conta (test-mag.lbl: "E PX MAG 2,2" sta in una riga)
+      if (line && ctx.measureText((line + word).trimEnd()).width * kx > maxW) { out.push(line.trimEnd()); line = word.trimStart() }
       else line += word
     }
     out.push(line.trimEnd())
@@ -907,16 +943,33 @@ function wrapLines(ctx, text, delim, maxW, kx) {
 }
 
 const PT_TO_MM = 25.4 / 72  // Fingerprint font size è in punti tipografici
-// Larghezza dei font della stampante rispetto al font del PC (Swiss 721 → Arial, stesse metriche Helvetica):
-// a parità di altezza la stampante è ~5% più stretta (verificato su stampa, test-mag.lbl e test-xor.lbl, 2026-10-27)
-const FONT_KX = { 'swiss 721 bt': 0.95, 'swiss 721 bold bt': 0.95 }
-const fontKx = name => FONT_KX[(name || '').toLowerCase()] ?? 1
-// Font mancante senza sostituto calibrato → testo rosso in anteprima (Swiss 721 → Arial è calibrato: nero)
+// Larghezza dei font della stampante rispetto al sostituto del PC (fontFallback): a parità di altezza
+// "ABCabc0123" a 10 pt misurato su stampa (test-font-1…4.lbl, 2026-10-28; Swiss 721 anche test-mag/test-xor)
+const FONT_KX = { 'swiss 721 bt': 0.96, 'swiss 721 bold bt': 0.97, 'swiss 721 bold condensed bt': 0.82,
+                  'zurich extra condensed bt': 0.60, 'dutch 801 roman bt': 1.03, 'century schoolbook roman': 1.08,
+                  'monospace 821': 1, 'monospace 821 bold': 1, 'letter gothic': 0.84, 'ocr a': 0.99,
+                  'ocr b': 1, 'andale mono': 1, 'andale mono bold': 1, 'cg times': 1.03, 'cg times bold': 0.98,
+                  'cg triumvirate condensed bold': 0.81, 'univers': 1, 'univers bold': 1.01,
+                  'univers condensed bold': 0.82, 'univers extra condensed': 0.60 }
+// Vale solo se il font manca sul PC (si usa il sostituto)
+const fontKx = name => missingFonts.value.has(name) ? FONT_KX[(name || '').toLowerCase()] ?? 1 : 1
+// Font mancante senza sostituto calibrato → testo rosso in anteprima (es. Swiss 721 → Arial è calibrato: nero)
 const fontRed = name => missingFonts.value.has(name) && !FONT_KX[(name || '').toLowerCase()]
+// Altezza non garantita: font non calibrati e quelli con altezza diversa dal sostituto (CG Triumvirate ~3 dot più alto a 10 pt, test-font-4)
+const FONT_TALL = new Set(['cg triumvirate condensed bold'])
+const fontHeightNote = name => fontRed(name) || (missingFonts.value.has(name) && FONT_TALL.has((name || '').toLowerCase()))
+// Sostituti per categoria
+function fontFallback(n) {
+  // OCR su Courier New fisso (non "OCR A Extended", presente solo su alcuni PC): FONT_KX è misurato su quello
+  if (/ocr|courier|gothic|mono/.test(n)) return '"Courier New",Courier,monospace'
+  if (/dutch|roman|rm bt|times|century|schoolbook/.test(n)) return '"Times New Roman",Times,serif'
+  return 'Arial,Helvetica,sans-serif'   // Swiss 721 BT, Zurich, Univers, Helvetica Neue, ecc.
+}
+const fontSubName = name => fontFallback((name || '').toLowerCase()).split(',')[0].replace(/"/g, '')
 
 // Cella del carattere misurata su stampa (Swiss 721, frazioni dell'em = dimensione FT):
-// sopra la linea di base 1.1 em, sotto 0.2 em
-const CELL_ASC = 1.1, CELL_DESC = 0.2
+// sopra la linea di base 1.1 em, sotto 0.25 em (0.2 fino al 2026-10-28: con MAG 5 la base in stampa era 9 dot più alta, test-mag-errore.lbl)
+const CELL_ASC = 1.1, CELL_DESC = 0.25
 // AN sul testo: 1-3 fondo cella · 4-6 linea di base · 7-9 cima cella → Y della linea di base (canvas, Y in giù)
 function textBaselineY(align, em) {
   const row = Math.floor(((AN[align] ? align : 1) - 1) / 3)
@@ -938,17 +991,7 @@ function fontCss(el, scale) {
 
   // Fallback per categoria — il nome originale è sempre primo:
   // se il font è installato nel sistema, il browser lo usa direttamente.
-  let fallback
-  if (n.includes('ocr'))
-    fallback = '"OCR A Extended","OCR B","Courier New",monospace'
-  else if (n.includes('courier') || n.includes('letter gothic') || n.includes('gothic'))
-    fallback = '"Courier New",Courier,monospace'
-  else if (n.includes('dutch') || n.includes('roman') || n.includes('rm bt') || n.includes('times'))
-    fallback = '"Times New Roman",Times,serif'
-  else
-    // Swiss 721 BT, Univers, Helvetica Neue, ecc. → sans-serif
-    fallback = 'Helvetica,Arial,sans-serif'
-
+  const fallback = fontFallback(n)
   const isMissing = missingFonts.value.has(name)
   const family = isMissing ? fallback : `"${name}",${fallback}`
   return { css: `${style} ${weight} ${sizePx}px ${family}`, sizePx, isMissing }
@@ -1004,20 +1047,69 @@ function renderCanvas() {
   ctx.fillRect(0, 0, W, H)
 
   // Ri-parse con i barcode in errore: la riga si interrompe come in stampa (dipende dai valori delle variabili)
-  const run = parseLayout(layoutSource.value, barcodeFails)
+  const run = parseLayout(layoutSource.value, el => el.type === 'box' ? pxFails(el) : barcodeFails(el))
   // La stampante salva i nomi delle immagini in maiuscolo: un PM con minuscole non trova l'immagine
   const lower = [...new Set(run.elements.filter(e => e.type === 'image').map(imageName).filter(n => n && n !== n.toUpperCase()))]
   parseWarnings.value = [...run.warnings, ...lower.map(n => `Immagine "${n}": in stampante i nomi sono maiuscoli, usa "${n.toUpperCase()}"`)]
   let cur = null   // cursore runtime della stampante (dot)
+  const drawn = []
+  ctx.save(); ctx.translate(0, -run.feed * scale)   // FORMFEED n: tutta la stampa sale di n dot sull'etichetta
   for (const el of run.elements) {
     const pos = el.follow && cur ? cur : { x: el.x, y: el.y }
     const at  = el.follow && cur ? { ...el, ...cur } : el
+    drawn.push(at)
     // II ignora XORMODE: cella nera e testo bianco coprono quello che c'è sotto (verificato su stampa, test-xor.lbl)
     const adv = el.xor && !el.invert ? drawXor(ctx, at, scale) : drawEl(ctx, at, scale)
     const [vx, vy] = DIR_VEC[el.dir] || DIR_VEC[1]
     // avanzamento lungo DIR + salita perpendicolare (verso l'alto in DIR 1, ruotata con DIR)
     cur = adv === null ? pos : { x: pos.x + vx * adv[0] - vy * adv[1], y: pos.y + vy * adv[0] + vx * adv[1] }
   }
+  ctx.restore()
+  parseWarnings.value.push(...outsideWarnings(drawn))
+}
+
+// ── Campi fuori etichetta ──
+// Senza CLIP ON un campo che esce dalla finestra di stampa dà errore 1003 (manuale p.24). Conta l'inchiostro, non la cella
+// del testo (test-fuori-cella.lbl: cella 6 dot sotto y 0, lettere dentro → stampato, 2026-10-28). Con CLIP ON la stampante
+// taglia a x 0 e y 0 (test-clip-on.lbl); a destra la finestra è più larga dell'etichetta (non taglia, ma lì non c'è carta).
+// Verifica: ogni oggetto disegnato da solo a 1 px = 1 dot su un canvas con margine, inchiostro nel margine = fuori.
+const OUT_M = 150
+const OUT_CMD = { text: 'PT', barcode: 'PB', image: 'PM', line: 'PL', box: 'PX' }
+// Barcode tagliato su quel lato da CLIP BARCODE …: HEIGHT = altezza delle barre (verificato, test-clip-bc-height.lbl, 2026-11-04),
+// INFORMATION = lungo il codice (verificato, test-clip-bc-information.lbl: toglie i caratteri interi, l'editor taglia esatto),
+// X / Y = assi dell'etichetta (dal manuale, non verificati). Con DIR 2/4 altezza e lunghezza si scambiano
+function bcClipped(el, side) {
+  if (el.type !== 'barcode') return false
+  const c = el.clipBc || {}, vert = side === 'alto' || side === 'basso', turned = el.dir === 2 || el.dir === 4
+  return vert ? !!(c.y || (turned ? c.information : c.height)) : !!(c.x || (turned ? c.height : c.information))
+}
+function outsideWarnings(els) {
+  const W = labelDots.w, H = labelDots.h
+  const probe = Object.assign(document.createElement('canvas'), { width: W + 2 * OUT_M, height: H + 2 * OUT_M })
+  const pc = probe.getContext('2d', { willReadFrequently: true })
+  const inked = (x, y, w, h) => {
+    const d = pc.getImageData(x, y, w, h).data
+    for (let i = 0; i < d.length; i += 4) if (d[i + 3] > 128 && d[i] + d[i + 1] + d[i + 2] < 600) return true
+    return false
+  }
+  const out = []
+  for (const el of els) {
+    // CLIP ON non vale per i barcode (test-clip-bc-on.lbl: errore 1003, 2026-11-03)
+    if (el.clip && el.type !== 'barcode') continue
+    // Immagini: tagliate al bordo anche senza CLIP, nessun errore (test-img-fuori.lbl, a sinistra, 2026-11-04)
+    if (el.type === 'image') continue
+    pc.clearRect(0, 0, probe.width, probe.height)
+    pc.save(); pc.translate(OUT_M, OUT_M); drawEl(pc, el, 1); pc.restore()
+    const sides = [
+      inked(0, 0, probe.width, OUT_M) && 'alto',
+      inked(0, OUT_M + H, probe.width, OUT_M) && 'basso',
+      inked(0, OUT_M, OUT_M, H) && 'sinistra',
+      inked(OUT_M + W, OUT_M, OUT_M, H) && 'destra'].filter(s => s && !bcClipped(el, s))
+    if (sides.length) out.push(`Riga ${el.line}: ${OUT_CMD[el.type] || el.type} esce dall'etichetta (${sides.join(', ')}): ` +
+      (sides.every(s => s === 'destra') ? 'in stampa tagliato'
+        : el.type === 'barcode' ? 'errore 1003 in stampa (per i barcode serve CLIP BARCODE HEIGHT/INFORMATION ON)' : 'senza CLIP ON errore 1003 in stampa'))
+  }
+  return [...new Set(out)]
 }
 
 // XORMODE ON: il campo si disegna su un livello bianco, si inverte (inchiostro = bianco) e si unisce con
@@ -1027,7 +1119,9 @@ function drawXor(ctx, el, scale) {
   layer.width = ctx.canvas.width; layer.height = ctx.canvas.height
   const lc = layer.getContext('2d')
   lc.fillStyle = '#fff'; lc.fillRect(0, 0, layer.width, layer.height)
+  lc.setTransform(ctx.getTransform())   // FORMFEED
   const adv = drawEl(lc, el, scale)
+  lc.resetTransform()
   lc.globalCompositeOperation = 'difference'; lc.fillRect(0, 0, layer.width, layer.height)
   ctx.save(); ctx.globalCompositeOperation = 'difference'; ctx.drawImage(layer, 0, 0); ctx.restore()
   return adv
@@ -1044,25 +1138,48 @@ function drawTextBox(ctx, el, scale) {
     ctx.strokeStyle = '#000'; ctx.lineWidth = t
     ctx.strokeRect(t / 2, -h + t / 2, w - t, h - t)
   }
-  const { css, sizePx: em } = fontCss(el, scale)
-  const isMissing = fontRed(el.fontName)
-  const kx =(el.fontWidth || 100) / 100 * (el.magW || 1) * fontKx(el.fontName), ky = el.magH || 1   // larghezza %, MAG, font
-  const sizePx = em * ky
-  ctx.font = css; ctx.fillStyle = isMissing ? '#dc2626' : '#000'
-  ctx.textAlign = AN[el.align]?.a || 'left'; ctx.textBaseline = 'top'
-  // Cornice del testo: bordo interno + offset; vOff è anche lo spazio fra le righe
-  const inH = t + el.hOff * scale, inV = t + el.vOff * scale, gap = el.vOff * scale
-  const frameW = w - 2 * inH, frameH = h - 2 * inV
-  const lines = wrapLines(ctx, resolveContent(el.content), el.delim, frameW, kx)
-  const blockH = lines.length * sizePx + (lines.length - 1) * gap
+  ctx.fillStyle = fontRed(el.fontName) ? '#dc2626' : '#000'
+  ctx.textAlign = AN[el.align]?.a || 'left'; ctx.textBaseline = 'alphabetic'
+  const { lines, kx, ky, em, lineH, gap, inH, inV, frameW, frameH, blockH } = pxText(ctx, el, scale)
   const x0 = inH + fx * frameW
-  const y0 = -h + inV + (1 - fy) * (frameH - blockH)
+  const y0 = -h + inV + (1 - fy) * (frameH - blockH)   // cima del blocco di righe
   lines.forEach((line, i) => {
     ctx.save()
-    ctx.translate(x0, y0 + i * (sizePx + gap)); ctx.scale(kx, ky)
+    ctx.translate(x0, y0 + i * (lineH + gap) + PX_ASC * em); ctx.scale(kx, ky)
     ctx.fillText(line, 0, 0)
     ctx.restore()
   })
+}
+
+// Righe del testo di un PX (misure in px canvas). Riga alta PX_LINE em, base a PX_ASC em dalla cima, vOff fra le righe
+// (test-px-a-capo.lbl, 8 pt: passo 47 dot = 1.28 em + 4, cima maiuscole 10 dot sotto la cornice, 2026-10-28)
+const PX_LINE = 1.28, PX_ASC = 1.0
+function pxText(ctx, el, scale) {
+  const t = el.thickness * scale
+  const { css, sizePx } = fontCss(el, scale)
+  const kx = (el.fontWidth || 100) / 100 * (el.magW || 1) * fontKx(el.fontName), ky = el.magH || 1   // larghezza %, MAG, font
+  const em = sizePx * ky, lineH = PX_LINE * em, gap = el.vOff * scale
+  ctx.font = css
+  // Cornice del testo: bordo interno + offset; vOff è anche lo spazio fra le righe
+  const inH = t + el.hOff * scale, inV = t + el.vOff * scale
+  const frameW = el.width * scale - 2 * inH, frameH = el.height * scale - 2 * inV
+  const lines = wrapLines(ctx, resolveContent(el.content), el.delim, frameW, kx)
+  const blockH = lines.length * lineH + (lines.length - 1) * gap
+  return { lines, kx, ky, em, lineH, gap, inH, inV, frameW, frameH, blockH }
+}
+
+// PX con testo che in stampa non esce (errore, test-px-parola-lunga.lbl e test-px-troppo-testo.lbl, 2026-10-28):
+// una parola più larga della cornice, oppure righe che non entrano in altezza contando la cella intera
+// (CELL_ASC + CELL_DESC: 3 righe a 8 pt in PX 150 → errore, in PX 220 → ok). Dato non noto ([VARn], espressioni) = stampabile
+function pxFails(el) {
+  const text = resolveContent(el.content)
+  if (!text || /\[(VAR\d+|expr)\]/.test(text)) return false
+  const ctx = document.createElement('canvas').getContext('2d')
+  const { lines, kx, ky, em, gap, frameW, frameH } = pxText(ctx, el, 1)
+  if (lines.some(l => ctx.measureText(l).width * kx > frameW + 0.5)) return 'parola più larga del box'
+  // Altezza senza MAG: test-mag.lbl (MAG 2,2, 3 righe da 6 pt in PX 170) è stampato anche se ingrandito non entra
+  if (lines.length * (CELL_ASC + CELL_DESC) * em / ky + (lines.length - 1) * gap > frameH) return 'testo più alto del box'
+  return false
 }
 
 // Disegna un oggetto; ritorna di quanti dot avanza il cursore lungo DIR (null = non avanza)
@@ -1122,9 +1239,18 @@ function barcodeImage(el, bcText) {
       } else if (!BWIP_2D.has(bcid) && !BWIP_STACKED.has(bcid) && bcid !== 'postnet')
         opts.height = (el.barcodeHeight || 100) / bwipScale * 25.4 / 72
       const eanGuard = BWIP_INCLTEXT.has(bcid) && !isAddon && !inclText
-      if (inclText || eanGuard) opts.includetext = true
-      bwipjsLib.toCanvas(offCanvas, opts)
+      if ((inclText && !isAddon) || eanGuard) opts.includetext = true   // add-on: cifre disegnate a parte (addonDigits)
+      // Aztec: la stampante usa il formato compatto se il dato ci sta (test-aztec.lbl, 2026-10-28: "ABC123" = 15×15
+      // uguale a bwip-js compact), bwip-js da solo sceglie il pieno 19×19
+      if (bcid === 'azteccode') opts.format = 'compact'
+      try { bwipjsLib.toCanvas(offCanvas, opts) }
+      catch (e) { if (bcid !== 'azteccode') throw e; delete opts.format; bwipjsLib.toCanvas(offCanvas, opts) }
       if (eanGuard) offCanvas = eanGuards(offCanvas, el.barcodeHeight || 100, 6 * bwipScale)
+      if (isAddon) {   // bwip-js fa le barre di ean2/ean5 più alte di height: in stampa sono alte BH (test-addon-qr.lbl)
+        const c = Object.assign(document.createElement('canvas'), { width: offCanvas.width, height: el.barcodeHeight || 100 })
+        c.getContext('2d').drawImage(offCanvas, 0, offCanvas.height - 1, offCanvas.width, 1, 0, 0, c.width, c.height)
+        offCanvas = c
+      }
       // PDF417 con righe fissate in cui il dato non entra: bwip-js aggiunge righe, la stampante non stampa nulla
       if (bcid === 'pdf417' && opts.rows && offCanvas.height / (bwipScale * opts.rowmult) > opts.rows + 0.5)
         throw new Error('PDF417: dato troppo lungo per le righe indicate')
@@ -1220,10 +1346,12 @@ function drawEl(ctx, el, scale) {
       // Lineari, DataMatrix/QR/Aztec: sotto il simbolo, campo = simbolo + offset + cella testo, AN vale per tutto il campo.
       // PLESSEY: testo sopra le barre (barre sul PP). PDF417: testo sotto il PP, fuori dal campo; cursore a fine barre.
       // EAN/UPC/add-on: interpretazione standard di bwip-js (inclText)
-      const bf  = el.barFont && !inclText ? el.barFont : null
-      const bfMode = !bf ? null : bcid === 'plessey' ? 'above' : bcid === 'pdf417' || bcid === 'micropdf417' ? 'pdf' : 'below'
+      // Aztec: BF ON non stampa testo, cursore a fine simbolo (test-aztec.lbl)
+      const bf  = el.barFont && !inclText && bcid !== 'azteccode' ? el.barFont : null
+      const bfMode = !bf ? null : bcid === 'plessey' ? 'above' : bcid === 'pdf417' ? 'pdf' : 'below'
       // Ingrandimento barfont: parametri mag di BF × MAG globale (manuale: MAG vale anche per il barfont)
-      const bfMagH = bf ? (bf.magH || 1) * (el.magH || 1) : 1, bfMagW = bf ? (bf.magW || 1) * (el.magW || 1) * fontKx(bf.name) : 1
+      // Barfont senza FONT_KX: in stampa "ABC123" Swiss 721 BT 8 pt è largo come Arial (+2%), non il 5% più stretto dei PT (test-addon-qr.lbl)
+      const bfMagH = bf ? (bf.magH || 1) * (el.magH || 1) : 1, bfMagW = bf ? (bf.magW || 1) * (el.magW || 1) : 1
       const bfEm = bf ? bf.size * PT_TO_MM * settings.dotsPerMm * scale * bfMagH : 0
       const bfCell = bf ? bf.offset * scale + (CELL_ASC + CELL_DESC) * bfEm : 0
       // EAN/UPC con BF ON: sotto le cifre resta uno spazio di ~3.5 moduli fino al PP (verificato su stampa)
@@ -1242,23 +1370,30 @@ function drawEl(ctx, el, scale) {
       }
       len = barsW
       // Cursore (verificato su stampa, test-cursore-ean.lbl): EAN/UPC non avanzano mai lungo DIR;
-      // con BF ON salgono al fondo delle barre corte (sopra le cifre). Add-on con BF ON: fine delle cifre
-      // (passo 6.4 moduli), riga del testo sopra le barre; con BF OFF fine barre come gli altri lineari
+      // con BF ON salgono al fondo delle barre corte (sopra le cifre). Add-on con BF ON: fine delle cifre,
+      // riga del testo sopra le barre; con BF OFF fine barre come gli altri lineari
       if (BWIP_INCLTEXT.has(bcid) && !isAddon) {
         len = 0
         if (inclText) rise = eanGap / scale + offCanvas.height - (el.barcodeHeight || 100)
       } else if (inclText) {
-        len = bcText.length * 6.4 * bwipScale * scale
-        rise = (el.barcodeHeight || 100) + 4 * bwipScale
+        const pitch = addonDigits(ctx, bcText, el.barcodeHeight || 100, bwipScale, scale)
+        len = bcText.length * pitch * scale
+        rise = (el.barcodeHeight || 100) + 7
       }
       if (bf) {
         const bfText = (el.barcodeType || '').toUpperCase() === 'SCCADDON' ? bcText + i25Check(bcText) : bcText
         ctx.font = fontCss({ fontName: bf.name, fontSize: bf.size, fontSlant: bf.slant }, scale).css
-        ctx.fillStyle = '#000'; ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic'
+        const bfMissing = fontRed(bf.name)   // font barfont mancante: rosso + tratteggio, come i PT
+        ctx.fillStyle = bfMissing ? '#dc2626' : '#000'; ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic'
         const baseY = bfMode === 'above' ? -bh - bf.offset * scale - CELL_DESC * bfEm
                     : bfMode === 'pdf'   ? bf.offset * scale + CELL_ASC * bfEm : -CELL_DESC * bfEm
         ctx.save(); ctx.translate(0, baseY); ctx.scale(bfMagW, bfMagH)
         ctx.fillText(bfText, 0, 0)
+        if (bfMissing) {
+          ctx.strokeStyle = '#dc2626'; ctx.lineWidth = Math.max(1, scale * 0.6) / bfMagH
+          ctx.setLineDash([3 * scale, 2 * scale])
+          ctx.beginPath(); ctx.moveTo(0, 2 / bfMagH); ctx.lineTo(ctx.measureText(bfText).width, 2 / bfMagH); ctx.stroke()
+        }
         ctx.restore()
         // con BF ON il cursore va a fine testo, anche in altezza (PLESSEY: riga del testo sopra le barre)
         if (bfMode !== 'pdf') len = ctx.measureText(bfText).width * bfMagW
